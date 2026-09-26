@@ -16,11 +16,11 @@ if PROJECT_ROOT not in sys.path:
 
 
 def launch_pipeline(
-    s3_bucket: str,
+    s3_bucket: str = "sagemaker-amazon-ml-016933545204-ap-south-1",
     s3_prefix: str = "amazon_ml_2026",
     instance_type: str = "ml.c5.4xlarge",
     instance_count: int = 4,
-    role_arn: Optional[str] = None,
+    role_arn: Optional[str] = "arn:aws:iam::016933545204:role/AmazonSageMaker-ExecutionRole-AmazonML",
     local_test_dir: str = "student_resource/dataset/test",
     output_dir: str = "output",
     dry_run: bool = False,
@@ -185,11 +185,11 @@ python sagemaker/merge_submission.py --shard-dir output/sagemaker_shards --outpu
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Launch Amazon ML SageMaker Production Pipeline")
-    parser.add_argument("--s3-bucket", default="amazon-ml-challenge-2026-saurabh")
+    parser.add_argument("--s3-bucket", default="sagemaker-amazon-ml-016933545204-ap-south-1")
     parser.add_argument("--s3-prefix", default="entity_resolution")
     parser.add_argument("--instance-type", default="ml.c5.4xlarge")
     parser.add_argument("--instance-count", type=int, default=4)
-    parser.add_argument("--role-arn", default=None)
+    parser.add_argument("--role-arn", default="arn:aws:iam::016933545204:role/AmazonSageMaker-ExecutionRole-AmazonML")
     parser.add_argument("--dry-run", action="store_true", help="Validate setup without submitting cloud job")
 
     args = parser.parse_args()

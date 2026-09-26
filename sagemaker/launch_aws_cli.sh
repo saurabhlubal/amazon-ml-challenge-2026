@@ -2,12 +2,12 @@
 # Standalone AWS CLI launch script for Amazon ML Challenge 2026 SageMaker Processing Job
 set -euo pipefail
 
-BUCKET="amazon-ml-challenge-2026-saurabh"
+BUCKET="sagemaker-amazon-ml-016933545204-ap-south-1"
 PREFIX="entity_resolution"
 INST_TYPE="ml.c5.4xlarge"
 INST_COUNT=4
-ROLE="${SAGEMAKER_ROLE:-arn:aws:iam::123456789012:role/service-role/AmazonSageMaker-ExecutionRole}"
-REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+ROLE="arn:aws:iam::016933545204:role/AmazonSageMaker-ExecutionRole-AmazonML"
+REGION="ap-south-1"
 JOB_NAME="amazon-ml-er-pipeline-$(date +%s)"
 
 echo "=== [1/4] Syncing Data and Artifacts to S3 ==="
