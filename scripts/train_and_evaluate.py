@@ -31,7 +31,9 @@ if WORKSPACE_ROOT not in sys.path:
 
 from business_entity_resolution.src.features import (
     FEATURE_NAMES,
+    ParsedRecord,
     build_features,
+    build_features_from_parsed,
     clean_text,
     get_tokens,
 )
@@ -346,25 +348,30 @@ def run_experiment(
     print(f"Validation Pairs: {len(val_pairs):,} total ({pos_val:,} positive, {neg_val:,} negative).")
 
     # Step 4: Pairwise Feature Extraction
-    print(f"\nExtracting {len(FEATURE_NAMES)} pairwise features for Train pairs...")
+    print(f"\nExtracting {len(FEATURE_NAMES)} pairwise features with ParsedRecord caching...")
+    t_parse = time.time()
+    parsed_s1 = {s1: ParsedRecord(s1_dict[s1]) for s1 in s1_dict}
+    parsed_cand = {cid: ParsedRecord(cand_dict[cid]) for cid in cand_dict}
+    print(f"Pre-parsed {len(parsed_s1):,} S1 and {len(parsed_cand):,} candidate entities in {time.time()-t_parse:.2f}s.")
+
     t_feat_start = time.time()
     train_feat_records = [
-        build_features(s1_dict[s1], cand_dict[cid]) for s1, cid, _ in train_pairs
+        build_features_from_parsed(parsed_s1[s1], parsed_cand[cid]) for s1, cid, _ in train_pairs
     ]
     X_train = pd.DataFrame(train_feat_records, columns=FEATURE_NAMES).fillna(0.0)
     y_train = np.array([y for _, _, y in train_pairs], dtype=np.int32)
     feat_train_time = time.time() - t_feat_start
-    print(f"Train feature extraction completed in {feat_train_time:.2f}s ({len(train_pairs)/feat_train_time:.0f} pairs/sec).")
+    print(f"Train feature extraction completed in {feat_train_time:.2f}s ({len(train_pairs)/max(0.001, feat_train_time):.0f} pairs/sec).")
 
     print(f"Extracting pairwise features for Validation pairs...")
     t_val_feat_start = time.time()
     val_feat_records = [
-        build_features(s1_dict[s1], cand_dict[cid]) for s1, cid, _ in val_pairs
+        build_features_from_parsed(parsed_s1[s1], parsed_cand[cid]) for s1, cid, _ in val_pairs
     ]
     X_val = pd.DataFrame(val_feat_records, columns=FEATURE_NAMES).fillna(0.0)
     y_val = np.array([y for _, _, y in val_pairs], dtype=np.int32)
     feat_val_time = time.time() - t_val_feat_start
-    print(f"Validation feature extraction completed in {feat_val_time:.2f}s.")
+    print(f"Validation feature extraction completed in {feat_val_time:.2f}s ({len(val_pairs)/max(0.001, feat_val_time):.0f} pairs/sec).")
 
     # Step 5: Train Model
     print(f"\nTraining EntityMatcher (algorithm={algorithm})...")

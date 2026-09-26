@@ -184,6 +184,33 @@ class EntityMatcher:
             return probs[:, 0].astype(np.float32)
         return probs.astype(np.float32)
 
+    @property
+    def feature_importances_(self) -> Optional[np.ndarray]:
+        """Expose feature importances from underlying model if available."""
+        if self.model is None:
+            return None
+        if hasattr(self.model, "feature_importances_"):
+            return np.asarray(self.model.feature_importances_)
+        return None
+
+    def predict_in_batches(
+        self,
+        X: Union[np.ndarray, pd.DataFrame],
+        batch_size: int = 50_000,
+    ) -> np.ndarray:
+        """
+        Predict probabilities in chunks to prevent memory spikes on massive candidate sets.
+        """
+        n_samples = len(X)
+        if n_samples <= batch_size:
+            return self.predict_proba(X)
+
+        out = np.empty(n_samples, dtype=np.float32)
+        for i in range(0, n_samples, batch_size):
+            chunk = X[i : i + batch_size]
+            out[i : i + batch_size] = self.predict_proba(chunk)
+        return out
+
     def save(self, path: str):
         """Serialize model to file."""
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

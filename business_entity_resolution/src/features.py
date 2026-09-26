@@ -3,13 +3,15 @@ Pairwise feature extraction for Business Entity Resolution.
 
 Extracts similarity, lexical, numeric, and categorical comparison signals
 between a Source 1 query entity and candidate entities (Source 2 / Source 3).
+Includes parsed record caching, legal entity normalization, address component
+normalization, and multilingual Unicode safety.
 """
 
 from __future__ import annotations
 
-import math
+import collections
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 import numpy as np
 import pandas as pd
 
@@ -21,20 +23,74 @@ except ImportError:
     import difflib
     HAS_RAPIDFUZZ = False
 
-# Compiled regular expressions for speed
+# Compiled regular expressions for speed (Unicode-aware)
 RE_ALPHANUM = re.compile(r"[^\w\s]", re.UNICODE)
 RE_WHITESPACE = re.compile(r"\s+")
 RE_DIGITS = re.compile(r"\b\d+\b")
 RE_TOKEN = re.compile(r"\b\w+\b", re.UNICODE)
 
+# Common business legal entity abbreviations
+LEGAL_ENTITY_MAP: Dict[str, str] = {
+    "corporation": "corp",
+    "corp": "corp",
+    "incorporated": "inc",
+    "inc": "inc",
+    "limited": "ltd",
+    "ltd": "ltd",
+    "private": "pvt",
+    "pvt": "pvt",
+    "company": "co",
+    "co": "co",
+    "llc": "llc",
+    "llp": "llp",
+    "plc": "plc",
+    "gmbh": "gmbh",
+    "sa": "sa",
+    "sarl": "sarl",
+}
+
+# Common address street suffixes
+STREET_SUFFIX_MAP: Dict[str, str] = {
+    "street": "st",
+    "st": "st",
+    "road": "rd",
+    "rd": "rd",
+    "drive": "dr",
+    "dr": "dr",
+    "avenue": "ave",
+    "ave": "ave",
+    "boulevard": "blvd",
+    "blvd": "blvd",
+    "lane": "ln",
+    "ln": "ln",
+    "highway": "hwy",
+    "hwy": "hwy",
+    "circle": "cir",
+    "cir": "cir",
+    "court": "ct",
+    "ct": "ct",
+}
+
+
+import unicodedata
+
+def strip_latin_accents(text: str) -> str:
+    """Strip combining diacritics from Latin scripts (e.g. é -> e) while preserving Indic/Devanagari matras."""
+    result = []
+    for c in unicodedata.normalize("NFKD", text):
+        if "\u0300" <= c <= "\u036f":
+            continue
+        result.append(c)
+    return "".join(result)
+
 
 def clean_text(text: Optional[str]) -> str:
-    """Standardize string: lowercase, remove punctuation, collapse whitespace."""
+    """Standardize string: lowercase, strip Latin accents, remove punctuation, collapse whitespace (Unicode-safe)."""
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
-    # Remove punctuation, lowercase, collapse whitespace
+    text = strip_latin_accents(text)
     text = RE_ALPHANUM.sub(" ", text.lower())
     return RE_WHITESPACE.sub(" ", text).strip()
 
@@ -44,16 +100,21 @@ def get_tokens(text: str) -> List[str]:
     return RE_TOKEN.findall(text)
 
 
-def get_token_set(text: str) -> Set[str]:
-    """Return set of word tokens."""
-    return set(get_tokens(text))
-
-
 def get_digits(text: Optional[str]) -> List[str]:
-    """Extract all standalone or embedded digit sequences."""
+    """Extract all standalone digit sequences."""
     if not text:
         return []
     return RE_DIGITS.findall(str(text))
+
+
+def normalize_legal_tokens(tokens: Sequence[str]) -> List[str]:
+    """Map legal entity abbreviations to standardized canonical forms."""
+    return [LEGAL_ENTITY_MAP.get(t, t) for t in tokens]
+
+
+def normalize_street_tokens(tokens: Sequence[str]) -> List[str]:
+    """Map street/address abbreviations to standardized canonical forms."""
+    return [STREET_SUFFIX_MAP.get(t, t) for t in tokens]
 
 
 def levenshtein_sim(s1: str, s2: str) -> float:
@@ -147,7 +208,55 @@ def overlap_coefficient(tokens1: Set[str], tokens2: Set[str]) -> float:
     return inter_len / min_len if min_len > 0 else 0.0
 
 
-# Feature column specification
+class ParsedRecord:
+    """
+    Cached, pre-tokenized record for rapid pairwise feature computation.
+    """
+    __slots__ = (
+        "entity_id", "raw_name", "raw_addr", "country",
+        "name", "addr", "tokens_n", "set_n",
+        "norm_tokens_n", "norm_set_n", "core_set_n", "tokens_a", "set_a",
+        "norm_tokens_a", "norm_set_a", "digits_n", "digits_a",
+        "all_digits", "first_num", "len_name", "len_addr",
+        "cnt_name", "cnt_addr", "addr_missing",
+    )
+
+    def __init__(self, record: Dict[str, Any]):
+        self.entity_id = str(record.get("entity_id") or "")
+        self.raw_name = str(record.get("business_name") or "")
+        self.raw_addr = str(record.get("business_address") or "")
+        self.country = str(record.get("country") or "").strip().upper()
+
+        self.name = clean_text(self.raw_name)
+        self.addr = clean_text(self.raw_addr)
+
+        self.tokens_n = get_tokens(self.name)
+        self.set_n = set(self.tokens_n)
+        self.norm_tokens_n = normalize_legal_tokens(self.tokens_n)
+        self.norm_set_n = set(self.norm_tokens_n)
+        legal_words = set(LEGAL_ENTITY_MAP.keys()) | set(LEGAL_ENTITY_MAP.values())
+        self.core_set_n = {t for t in self.tokens_n if t not in legal_words}
+
+        self.tokens_a = get_tokens(self.addr)
+        self.set_a = set(self.tokens_a)
+        self.norm_tokens_a = normalize_street_tokens(self.tokens_a)
+        self.norm_set_a = set(self.norm_tokens_a)
+
+        self.digits_n = set(get_digits(self.raw_name))
+        self.digits_a = set(get_digits(self.raw_addr))
+        self.all_digits = self.digits_n | self.digits_a
+
+        all_nums = get_digits(self.raw_addr) or get_digits(self.raw_name) or [None]
+        self.first_num = all_nums[0]
+
+        self.len_name = len(self.name)
+        self.len_addr = len(self.addr)
+        self.cnt_name = len(self.tokens_n)
+        self.cnt_addr = len(self.tokens_a)
+        self.addr_missing = 1.0 if not self.addr else 0.0
+
+
+# Complete Feature Names Specification (44 features)
 FEATURE_NAMES: List[str] = [
     # Business Name features
     "name_levenshtein_sim",
@@ -156,6 +265,10 @@ FEATURE_NAMES: List[str] = [
     "name_token_jaccard",
     "name_token_dice",
     "name_token_overlap_min",
+    "name_norm_token_jaccard",
+    "name_norm_token_overlap_min",
+    "name_core_token_jaccard",
+    "name_core_token_dice",
     "name_exact_match",
     "name_prefix_match_4",
     "name_suffix_match_4",
@@ -164,7 +277,7 @@ FEATURE_NAMES: List[str] = [
     "name_token_count_diff",
     "name_token_count_ratio",
     "name_is_single_token",
-    
+
     # Address features
     "address_is_missing_s1",
     "address_is_missing_s2",
@@ -175,6 +288,8 @@ FEATURE_NAMES: List[str] = [
     "address_token_jaccard",
     "address_token_dice",
     "address_token_overlap_min",
+    "address_norm_token_jaccard",
+    "address_norm_token_overlap_min",
     "address_exact_match",
     "address_length_diff",
     "address_length_ratio",
@@ -201,86 +316,44 @@ FEATURE_NAMES: List[str] = [
 ]
 
 
-def build_features(
-    source1_record: Dict[str, Any],
-    candidate_record: Dict[str, Any],
-) -> Dict[str, float]:
+def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, float]:
     """
-    Build comprehensive comparison features for an S1 / candidate pair.
-
-    Parameters
-    ----------
-    source1_record : dict
-        Source1 entity containing:
-        entity_id, business_name, business_address, country
-        (plus optional pre-normalized fields)
-    candidate_record : dict
-        Source2 or Source3 candidate entity containing:
-        entity_id, business_name, business_address, country
-        (plus optional pre-normalized fields)
-
-    Returns
-    -------
-    dict
-        Feature name -> numeric float value.
+    Build features using pre-parsed records for ultra-fast throughput.
     """
-    # 1. Extract and clean strings
-    raw_name1 = str(source1_record.get("business_name") or "")
-    raw_name2 = str(candidate_record.get("business_name") or "")
-    name1 = clean_text(raw_name1)
-    name2 = clean_text(raw_name2)
-
-    raw_addr1 = str(source1_record.get("business_address") or "")
-    raw_addr2 = str(candidate_record.get("business_address") or "")
-    addr1 = clean_text(raw_addr1)
-    addr2 = clean_text(raw_addr2)
-
-    country1 = str(source1_record.get("country") or "").strip().upper()
-    country2 = str(candidate_record.get("country") or "").strip().upper()
-
-    # 2. Tokenize
-    tokens_n1 = get_tokens(name1)
-    tokens_n2 = get_tokens(name2)
-    set_n1 = set(tokens_n1)
-    set_n2 = set(tokens_n2)
-
-    tokens_a1 = get_tokens(addr1)
-    tokens_a2 = get_tokens(addr2)
-    set_a1 = set(tokens_a1)
-    set_a2 = set(tokens_a2)
-
-    # 3. Business Name features
-    len_n1, len_n2 = len(name1), len(name2)
-    cnt_n1, cnt_n2 = len(tokens_n1), len(tokens_n2)
-
-    feat_name_lev = levenshtein_sim(name1, name2)
-    feat_name_sort = token_sort_sim(name1, name2)
-    feat_name_set = token_set_sim(name1, name2)
-    feat_name_jaccard = jaccard_similarity(set_n1, set_n2)
-    feat_name_dice = dice_similarity(set_n1, set_n2)
-    feat_name_overlap = overlap_coefficient(set_n1, set_n2)
-    feat_name_exact = 1.0 if name1 and name1 == name2 else 0.0
+    # 1. Name features
+    feat_name_lev = levenshtein_sim(p1.name, p2.name)
+    feat_name_sort = token_sort_sim(p1.name, p2.name)
+    feat_name_set = token_set_sim(p1.name, p2.name)
+    feat_name_jaccard = jaccard_similarity(p1.set_n, p2.set_n)
+    feat_name_dice = dice_similarity(p1.set_n, p2.set_n)
+    feat_name_overlap = overlap_coefficient(p1.set_n, p2.set_n)
+    feat_name_norm_jaccard = jaccard_similarity(p1.norm_set_n, p2.norm_set_n)
+    feat_name_norm_overlap = overlap_coefficient(p1.norm_set_n, p2.norm_set_n)
+    feat_name_core_jaccard = jaccard_similarity(p1.core_set_n, p2.core_set_n)
+    feat_name_core_dice = dice_similarity(p1.core_set_n, p2.core_set_n)
+    feat_name_exact = 1.0 if p1.name and p1.name == p2.name else 0.0
 
     # Prefix/suffix match (min 4 chars)
     prefix_len = 4
-    if len_n1 >= prefix_len and len_n2 >= prefix_len:
-        feat_name_prefix = 1.0 if name1[:prefix_len] == name2[:prefix_len] else 0.0
-        feat_name_suffix = 1.0 if name1[-prefix_len:] == name2[-prefix_len:] else 0.0
+    if p1.len_name >= prefix_len and p2.len_name >= prefix_len:
+        feat_name_prefix = 1.0 if p1.name[:prefix_len] == p2.name[:prefix_len] else 0.0
+        feat_name_suffix = 1.0 if p1.name[-prefix_len:] == p2.name[-prefix_len:] else 0.0
     else:
-        feat_name_prefix = 1.0 if name1 and name1 == name2 else 0.0
-        feat_name_suffix = 1.0 if name1 and name1 == name2 else 0.0
+        feat_name_prefix = 1.0 if p1.name and p1.name == p2.name else 0.0
+        feat_name_suffix = 1.0 if p1.name and p1.name == p2.name else 0.0
 
-    feat_name_len_diff = float(abs(len_n1 - len_n2))
-    feat_name_len_ratio = (min(len_n1, len_n2) / max(len_n1, len_n2)) if max(len_n1, len_n2) > 0 else 1.0
-    feat_name_cnt_diff = float(abs(cnt_n1 - cnt_n2))
-    feat_name_cnt_ratio = (min(cnt_n1, cnt_n2) / max(cnt_n1, cnt_n2)) if max(cnt_n1, cnt_n2) > 0 else 1.0
-    feat_name_single_token = 1.0 if (cnt_n1 == 1 or cnt_n2 == 1) else 0.0
+    max_n_len = max(p1.len_name, p2.len_name)
+    feat_name_len_diff = float(abs(p1.len_name - p2.len_name))
+    feat_name_len_ratio = (min(p1.len_name, p2.len_name) / max_n_len) if max_n_len > 0 else 1.0
 
-    # 4. Address features
-    addr1_missing = 1.0 if not addr1 else 0.0
-    addr2_missing = 1.0 if not addr2 else 0.0
-    addr_either_missing = 1.0 if (addr1_missing or addr2_missing) else 0.0
-    addr_both_missing = 1.0 if (addr1_missing and addr2_missing) else 0.0
+    max_n_cnt = max(p1.cnt_name, p2.cnt_name)
+    feat_name_cnt_diff = float(abs(p1.cnt_name - p2.cnt_name))
+    feat_name_cnt_ratio = (min(p1.cnt_name, p2.cnt_name) / max_n_cnt) if max_n_cnt > 0 else 1.0
+    feat_name_single_token = 1.0 if (p1.cnt_name == 1 or p2.cnt_name == 1) else 0.0
+
+    # 2. Address features
+    addr_either_missing = 1.0 if (p1.addr_missing or p2.addr_missing) else 0.0
+    addr_both_missing = 1.0 if (p1.addr_missing and p2.addr_missing) else 0.0
 
     if addr_either_missing:
         feat_addr_lev = 0.0
@@ -288,63 +361,55 @@ def build_features(
         feat_addr_jaccard = 0.0
         feat_addr_dice = 0.0
         feat_addr_overlap = 0.0
+        feat_addr_norm_jaccard = 0.0
+        feat_addr_norm_overlap = 0.0
         feat_addr_exact = 0.0
-        feat_addr_len_diff = float(abs(len(addr1) - len(addr2)))
+        feat_addr_len_diff = float(abs(p1.len_addr - p2.len_addr))
         feat_addr_len_ratio = 0.0
     else:
-        feat_addr_lev = levenshtein_sim(addr1, addr2)
-        feat_addr_sort = token_sort_sim(addr1, addr2)
-        feat_addr_jaccard = jaccard_similarity(set_a1, set_a2)
-        feat_addr_dice = dice_similarity(set_a1, set_a2)
-        feat_addr_overlap = overlap_coefficient(set_a1, set_a2)
-        feat_addr_exact = 1.0 if addr1 == addr2 else 0.0
-        feat_addr_len_diff = float(abs(len(addr1) - len(addr2)))
-        max_l = max(len(addr1), len(addr2))
-        feat_addr_len_ratio = min(len(addr1), len(addr2)) / max_l if max_l > 0 else 1.0
+        feat_addr_lev = levenshtein_sim(p1.addr, p2.addr)
+        feat_addr_sort = token_sort_sim(p1.addr, p2.addr)
+        feat_addr_jaccard = jaccard_similarity(p1.set_a, p2.set_a)
+        feat_addr_dice = dice_similarity(p1.set_a, p2.set_a)
+        feat_addr_overlap = overlap_coefficient(p1.set_a, p2.set_a)
+        feat_addr_norm_jaccard = jaccard_similarity(p1.norm_set_a, p2.norm_set_a)
+        feat_addr_norm_overlap = overlap_coefficient(p1.norm_set_a, p2.norm_set_a)
+        feat_addr_exact = 1.0 if p1.addr == p2.addr else 0.0
+        feat_addr_len_diff = float(abs(p1.len_addr - p2.len_addr))
+        max_a_len = max(p1.len_addr, p2.len_addr)
+        feat_addr_len_ratio = min(p1.len_addr, p2.len_addr) / max_a_len if max_a_len > 0 else 1.0
 
-    # 5. Country features
-    country_missing = 1.0 if (not country1 or not country2) else 0.0
+    # 3. Country features
+    country_missing = 1.0 if (not p1.country or not p2.country) else 0.0
     if country_missing:
         feat_country_exact = 0.0
         feat_country_mismatch = 0.0
-    elif country1 == country2:
+    elif p1.country == p2.country:
         feat_country_exact = 1.0
         feat_country_mismatch = 0.0
     else:
         feat_country_exact = 0.0
         feat_country_mismatch = 1.0
 
-    # 6. Numeric agreement
-    # Name digits
-    digits_n1 = set(get_digits(raw_name1))
-    digits_n2 = set(get_digits(raw_name2))
-    num_name_jaccard = jaccard_similarity(digits_n1, digits_n2)
-    num_name_conflict = 1.0 if (digits_n1 and digits_n2 and not (digits_n1 & digits_n2)) else 0.0
+    # 4. Numeric agreement
+    num_name_jaccard = jaccard_similarity(p1.digits_n, p2.digits_n)
+    num_name_conflict = 1.0 if (p1.digits_n and p2.digits_n and not (p1.digits_n & p2.digits_n)) else 0.0
 
-    # Address digits (house numbers, postal codes, unit numbers)
-    digits_a1 = set(get_digits(raw_addr1))
-    digits_a2 = set(get_digits(raw_addr2))
-    num_addr_jaccard = jaccard_similarity(digits_a1, digits_a2)
-    num_addr_conflict = 1.0 if (digits_a1 and digits_a2 and not (digits_a1 & digits_a2)) else 0.0
+    num_addr_jaccard = jaccard_similarity(p1.digits_a, p2.digits_a)
+    num_addr_conflict = 1.0 if (p1.digits_a and p2.digits_a and not (p1.digits_a & p2.digits_a)) else 0.0
 
-    # All digits combined
-    all_dig1 = digits_n1 | digits_a1
-    all_dig2 = digits_n2 | digits_a2
-    num_all_jaccard = jaccard_similarity(all_dig1, all_dig2)
-    num_all_has_common = 1.0 if (all_dig1 & all_dig2) else 0.0
-    num_all_conflict = 1.0 if (all_dig1 and all_dig2 and not (all_dig1 & all_dig2)) else 0.0
+    num_all_jaccard = jaccard_similarity(p1.all_digits, p2.all_digits)
+    num_all_has_common = 1.0 if (p1.all_digits & p2.all_digits) else 0.0
+    num_all_conflict = 1.0 if (p1.all_digits and p2.all_digits and not (p1.all_digits & p2.all_digits)) else 0.0
 
-    # Primary number match (first numeric token in address or name)
-    first_num1 = (get_digits(raw_addr1) or get_digits(raw_name1) or [None])[0]
-    first_num2 = (get_digits(raw_addr2) or get_digits(raw_name2) or [None])[0]
-    if first_num1 and first_num2:
-        num_primary_match = 1.0 if first_num1 == first_num2 else 0.0
+    if p1.first_num is not None and p2.first_num is not None:
+        num_primary_match = 1.0 if p1.first_num == p2.first_num else 0.0
     else:
         num_primary_match = 0.0
 
-    # 7. Cross-field interactions
+    # 5. Cross-field interactions
     name_and_country_match = feat_name_exact * feat_country_exact
-    name_and_address_prod = feat_name_jaccard * feat_addr_jaccard
+    name_and_address_prod = feat_name_norm_jaccard * feat_addr_norm_jaccard
     overall_composite = (0.5 * feat_name_sort) + (0.35 * feat_addr_sort) + (0.15 * feat_country_exact)
 
     return {
@@ -354,6 +419,10 @@ def build_features(
         "name_token_jaccard": feat_name_jaccard,
         "name_token_dice": feat_name_dice,
         "name_token_overlap_min": feat_name_overlap,
+        "name_norm_token_jaccard": feat_name_norm_jaccard,
+        "name_norm_token_overlap_min": feat_name_norm_overlap,
+        "name_core_token_jaccard": feat_name_core_jaccard,
+        "name_core_token_dice": feat_name_core_dice,
         "name_exact_match": feat_name_exact,
         "name_prefix_match_4": feat_name_prefix,
         "name_suffix_match_4": feat_name_suffix,
@@ -363,8 +432,8 @@ def build_features(
         "name_token_count_ratio": feat_name_cnt_ratio,
         "name_is_single_token": feat_name_single_token,
 
-        "address_is_missing_s1": addr1_missing,
-        "address_is_missing_s2": addr2_missing,
+        "address_is_missing_s1": p1.addr_missing,
+        "address_is_missing_s2": p2.addr_missing,
         "address_is_missing_either": addr_either_missing,
         "address_is_missing_both": addr_both_missing,
         "address_levenshtein_sim": feat_addr_lev,
@@ -372,6 +441,8 @@ def build_features(
         "address_token_jaccard": feat_addr_jaccard,
         "address_token_dice": feat_addr_dice,
         "address_token_overlap_min": feat_addr_overlap,
+        "address_norm_token_jaccard": feat_addr_norm_jaccard,
+        "address_norm_token_overlap_min": feat_addr_norm_overlap,
         "address_exact_match": feat_addr_exact,
         "address_length_diff": feat_addr_len_diff,
         "address_length_ratio": feat_addr_len_ratio,
@@ -395,6 +466,32 @@ def build_features(
     }
 
 
+def build_features(
+    source1_record: Dict[str, Any],
+    candidate_record: Dict[str, Any],
+) -> Dict[str, float]:
+    """
+    Build comprehensive comparison features for an S1 / candidate pair.
+
+    Parameters
+    ----------
+    source1_record : dict
+        Source1 entity containing:
+        entity_id, business_name, business_address, country
+    candidate_record : dict
+        Source2 or Source3 candidate entity containing:
+        entity_id, business_name, business_address, country
+
+    Returns
+    -------
+    dict
+        Feature name -> numeric float value.
+    """
+    p1 = source1_record if isinstance(source1_record, ParsedRecord) else ParsedRecord(source1_record)
+    p2 = candidate_record if isinstance(candidate_record, ParsedRecord) else ParsedRecord(candidate_record)
+    return build_features_from_parsed(p1, p2)
+
+
 def extract_candidate_features(
     candidate_pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]],
     feature_names: Optional[List[str]] = None,
@@ -405,7 +502,7 @@ def extract_candidate_features(
     Parameters
     ----------
     candidate_pairs : iterable of (dict, dict)
-        Stream or collection of entity record pairs.
+        Collection of entity record pairs.
     feature_names : list of str, optional
         Subset of features to extract. Defaults to FEATURE_NAMES.
 
@@ -436,32 +533,32 @@ def extract_features_from_df(
     cand_col: str = "candidate_entity_id",
 ) -> pd.DataFrame:
     """
-    Extract features from a DataFrame of candidate pairs by looking up records in entity dictionaries.
-
-    Parameters
-    ----------
-    pairs_df : pd.DataFrame
-        Table with s1_col and cand_col columns.
-    s1_dict : dict
-        Mapping s1_id -> S1 record dict.
-    cand_dict : dict
-        Mapping cand_id -> candidate record dict.
-
-    Returns
-    -------
-    pd.DataFrame
-        Extracted features.
+    Extract features with parsed record caching for maximum efficiency.
     """
     s1_ids = pairs_df[s1_col].values
     cand_ids = pairs_df[cand_col].values
 
-    rows = []
-    empty_rec: Dict[str, Any] = {"business_name": "", "business_address": "", "country": ""}
+    # Pre-parse unique records
+    parsed_s1: Dict[str, ParsedRecord] = {}
+    parsed_cand: Dict[str, ParsedRecord] = {}
+    empty_raw = {"business_name": "", "business_address": "", "country": ""}
 
-    for s1_id, cand_id in zip(s1_ids, cand_ids):
-        rec1 = s1_dict.get(s1_id, empty_rec)
-        rec2 = cand_dict.get(cand_id, empty_rec)
-        rows.append(build_features(rec1, rec2))
+    unique_s1 = set(s1_ids)
+    unique_cand = set(cand_ids)
+
+    for sid in unique_s1:
+        raw = s1_dict.get(sid, empty_raw)
+        parsed_s1[sid] = ParsedRecord(raw)
+
+    for cid in unique_cand:
+        raw = cand_dict.get(cid, empty_raw)
+        parsed_cand[cid] = ParsedRecord(raw)
+
+    rows = []
+    for sid, cid in zip(s1_ids, cand_ids):
+        p1 = parsed_s1[sid]
+        p2 = parsed_cand[cid]
+        rows.append(build_features_from_parsed(p1, p2))
 
     if not rows:
         return pd.DataFrame(columns=FEATURE_NAMES, dtype=np.float32)
