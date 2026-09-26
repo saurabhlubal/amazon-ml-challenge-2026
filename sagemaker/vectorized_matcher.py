@@ -35,7 +35,19 @@ class CompactInvertedIndex:
 
         norm = normalize_record(raw_record)
         cand_idx = len(self.cand_records)
-        self.cand_records.append(norm)
+        compact_cand = {
+            "entity_id": eid,
+            "raw_business_name": norm.get("raw_business_name", ""),
+            "business_name": norm.get("business_name", ""),
+            "name_signature": norm.get("name_signature", ""),
+            "business_address": norm.get("business_address", ""),
+            "country": norm.get("country", ""),
+            "name_tokens_set": norm.get("name_tokens_set", set()),
+            "address_tokens_set": norm.get("address_tokens_set", set()),
+            "address_numbers": norm.get("address_numbers", set()),
+            "char_shingles": norm.get("char_shingles", []),
+        }
+        self.cand_records.append(compact_cand)
         self.cand_eids.append(eid)
 
         keys = get_blocking_keys(norm, strategy=strategy)

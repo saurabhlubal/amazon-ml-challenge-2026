@@ -171,6 +171,27 @@ def run_shard_processing(
     return total_s1, total_candidates, total_matches
 
 
+def resolve_sagemaker_cluster_config(shard_id: int, total_shards: int) -> Tuple[int, int]:
+    """
+    Auto-detect shard index from SageMaker cluster configuration if running multi-instance.
+    """
+    config_path = "/opt/ml/config/resourceconfig.json"
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                res_cfg = json.load(f)
+            hosts = sorted(res_cfg.get("hosts", []))
+            cur_host = res_cfg.get("current_host")
+            if cur_host in hosts and len(hosts) > 1:
+                auto_shard = hosts.index(cur_host)
+                auto_total = len(hosts)
+                print(f"[SageMaker Cluster Discovery] Detected node {cur_host} -> Shard {auto_shard}/{auto_total}")
+                return auto_shard, auto_total
+        except Exception as e:
+            print(f"[Warning] Failed to read {config_path}: {e}")
+    return shard_id, total_shards
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SageMaker Worker Entrypoint for Entity Resolution")
     parser.add_argument("--s1-path", default="/opt/ml/processing/input/test_source1.tsv")
@@ -187,7 +208,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Fallback to local paths if container paths don't exist
+    # Auto-detect cluster topology if running inside SageMaker multi-instance job
+    resolved_shard_id, resolved_total_shards = resolve_sagemaker_cluster_config(args.shard_id, args.total_shards)
+
+    # Fallback to local paths ONLY if container input paths don't exist
     if not os.path.exists(args.s1_path):
         args.s1_path = os.path.join(PROJECT_ROOT, "student_resource", "dataset", "test", "test_source1.tsv")
     if not os.path.exists(args.s2_path):
@@ -196,7 +220,9 @@ if __name__ == "__main__":
         args.s3_path = os.path.join(PROJECT_ROOT, "student_resource", "dataset", "test", "test_source3.tsv")
     if not os.path.exists(args.model_path):
         args.model_path = os.path.join(PROJECT_ROOT, "business_entity_resolution", "src", "trained_model.json")
-    if args.output_dir.startswith("/opt/ml"):
+    
+    # Only fallback to local output directory if /opt/ml/processing does NOT exist (local dev mode)
+    if args.output_dir.startswith("/opt/ml") and not os.path.exists("/opt/ml/processing"):
         args.output_dir = os.path.join(PROJECT_ROOT, "output")
 
     run_shard_processing(
@@ -205,8 +231,8 @@ if __name__ == "__main__":
         s3_path=args.s3_path,
         model_path=args.model_path,
         output_dir=args.output_dir,
-        shard_id=args.shard_id,
-        total_shards=args.total_shards,
+        shard_id=resolved_shard_id,
+        total_shards=resolved_total_shards,
         batch_size=args.batch_size,
         max_s1_records=args.max_s1_records,
         max_cand_records=args.max_cand_records,

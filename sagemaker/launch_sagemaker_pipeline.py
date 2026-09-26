@@ -8,6 +8,7 @@ import sys
 import json
 import argparse
 import subprocess
+from typing import Optional, List, Dict
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -37,14 +38,14 @@ def launch_pipeline(
     try:
         import boto3
         import sagemaker
-        from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+        from sagemaker.processing import ProcessingInput, ProcessingOutput
+        from sagemaker.pytorch.processing import PyTorchProcessor
     except ImportError:
         print("[Warning] boto3 or sagemaker SDK is not installed in the local environment.")
         print("To submit jobs directly from Python, run: pip install boto3 sagemaker")
-        if not dry_run:
-            print("[Info] Writing standalone AWS CLI job definition script for immediate deployment...")
-            write_aws_cli_launcher(s3_bucket, s3_prefix, instance_type, instance_count, role_arn)
-            return
+        print("[Info] Writing standalone AWS CLI job definition script for immediate deployment...")
+        write_aws_cli_launcher(s3_bucket, s3_prefix, instance_type, instance_count, role_arn)
+        return
 
     s3 = boto3.client("s3")
     sagemaker_session = sagemaker.Session()
@@ -67,16 +68,17 @@ def launch_pipeline(
             print(f"  Uploading {fname} to {s3_data_uri}/{fname}...")
             s3.upload_file(fpath, s3_bucket, f"{s3_prefix}/data/{fname}")
 
-    # 2. Configure SageMaker ScriptProcessor
-    print("\n[Step 2/4] Initializing SageMaker ScriptProcessor...")
-    processor = ScriptProcessor(
-        command=["python3"],
-        image_uri=sagemaker.image_uris.retrieve("pytorch", sagemaker_session.boto_region_name, version="2.1.0", instance_type=instance_type, image_scope="training"),
+    # 2. Configure SageMaker PyTorchProcessor
+    print("\n[Step 2/4] Initializing SageMaker PyTorchProcessor...")
+    processor = PyTorchProcessor(
+        framework_version="2.1.0",
+        py_version="py310",
         role=role,
         instance_count=instance_count,
         instance_type=instance_type,
         volume_size_in_gb=100,
         base_job_name="amazon-ml-er-pipeline",
+        sagemaker_session=sagemaker_session,
     )
 
     inputs = [
@@ -101,15 +103,15 @@ def launch_pipeline(
 
     # 3. Launch processing job
     print("\n[Step 3/4] Launching distributed SageMaker Processing Job...")
-    entrypoint_script = os.path.join(PROJECT_ROOT, "sagemaker", "entrypoint.py")
-
     if dry_run:
         print(f"  [Dry Run] Configured job with {instance_count}x {instance_type} nodes.")
-        print(f"  [Dry Run] Entrypoint: {entrypoint_script}")
+        print(f"  [Dry Run] Source dir packaged: {PROJECT_ROOT}")
+        print(f"  [Dry Run] Entrypoint: sagemaker/entrypoint.py")
         return
 
     processor.run(
-        code=entrypoint_script,
+        code="sagemaker/entrypoint.py",
+        source_dir=PROJECT_ROOT,
         inputs=inputs,
         outputs=outputs,
         arguments=[
@@ -131,26 +133,53 @@ def launch_pipeline(
 
 
 def write_aws_cli_launcher(bucket: str, prefix: str, inst_type: str, inst_count: int, role: Optional[str]):
-    script_content = f"""#!/bin/bash
-# Standalone AWS CLI launch script for SageMaker Processing Job
-set -e
+    resolved_role = role or "${SAGEMAKER_ROLE:-arn:aws:iam::123456789012:role/service-role/AmazonSageMaker-ExecutionRole}"
+    
+    # Bash version
+    bash_script = f"""#!/bin/bash
+# Standalone AWS CLI launch script for Amazon ML Challenge 2026 SageMaker Processing Job
+set -euo pipefail
 
 BUCKET="{bucket}"
 PREFIX="{prefix}"
 INST_TYPE="{inst_type}"
-INST_COUNT="{inst_count}"
-ROLE="{role or '$SAGEMAKER_ROLE'}"
+INST_COUNT={inst_count}
+ROLE="{resolved_role}"
+REGION="${{AWS_DEFAULT_REGION:-us-east-1}}"
+JOB_NAME="amazon-ml-er-pipeline-$(date +%s)"
 
-echo "Syncing data to s3://$BUCKET/$PREFIX/..."
-aws s3 cp business_entity_resolution/src/trained_model.json s3://$BUCKET/$PREFIX/model/trained_model.json
-aws s3 sync student_resource/dataset/test/ s3://$BUCKET/$PREFIX/data/
+echo "=== [1/4] Syncing Data and Artifacts to S3 ==="
+aws s3 cp business_entity_resolution/src/trained_model.json "s3://$BUCKET/$PREFIX/model/trained_model.json"
+aws s3 cp student_resource/dataset/test/test_source1.tsv "s3://$BUCKET/$PREFIX/data/test_source1.tsv"
+aws s3 cp student_resource/dataset/test/test_source2.tsv "s3://$BUCKET/$PREFIX/data/test_source2.tsv"
+aws s3 cp student_resource/dataset/test/test_source3.tsv "s3://$BUCKET/$PREFIX/data/test_source3.tsv"
 
-echo "Submitting SageMaker processing job..."
-# See sagemaker/entrypoint.py for container entrypoint logic
+echo "=== [2/4] Packaging Source Code ==="
+tar -czf /tmp/sourcedir.tar.gz business_entity_resolution sagemaker scripts
+aws s3 cp /tmp/sourcedir.tar.gz "s3://$BUCKET/$PREFIX/code/sourcedir.tar.gz"
+
+echo "=== [3/4] Launching SageMaker Processing Job: $JOB_NAME ==="
+aws sagemaker create-processing-job \\
+    --processing-job-name "$JOB_NAME" \\
+    --role-arn "$ROLE" \\
+    --processing-resources "ClusterConfig={{InstanceCount=$INST_COUNT,InstanceType=$INST_TYPE,VolumeSizeInGB=100}}" \\
+    --app-specification "ImageUri=763104351884.dkr.ecr.$REGION.amazonaws.com/pytorch-training:2.1.0-cpu-py310-ubuntu20.04-sagemaker,ContainerEntrypoint=['python3','sagemaker/entrypoint.py','--total-shards','$INST_COUNT','--batch-size','2000']" \\
+    --processing-inputs "[{{\\"InputName\\":\\"data\\",\\"S3Input\\":{{\\"S3Uri\\":\\"s3://$BUCKET/$PREFIX/data\\",\\"LocalPath\\":\\"/opt/ml/processing/input\\",\\"S3DataType\\":\\"S3Prefix\\",\\"S3InputMode\\":\\"File\\",\\"S3DataDistributionType\\":\\"FullyReplicated\\"}}}},{{\\"InputName\\":\\"model\\",\\"S3Input\\":{{\\"S3Uri\\":\\"s3://$BUCKET/$PREFIX/model\\",\\"LocalPath\\":\\"/opt/ml/processing/model\\",\\"S3DataType\\":\\"S3Prefix\\",\\"S3InputMode\\":\\"File\\",\\"S3DataDistributionType\\":\\"FullyReplicated\\"}}}},{{\\"InputName\\":\\"code\\",\\"S3Input\\":{{\\"S3Uri\\":\\"s3://$BUCKET/$PREFIX/code/sourcedir.tar.gz\\",\\"LocalPath\\":\\"/opt/ml/processing/input/code\\",\\"S3DataType\\":\\"S3Prefix\\",\\"S3InputMode\\":\\"File\\",\\"S3CompressionType\\":\\"Gzip\\"}}开发}}]" \\
+    --processing-output-config "Outputs=[{{\\"OutputName\\":\\"output\\",\\"S3Output\\":{{\\"S3Uri\\":\\"s3://$BUCKET/$PREFIX/output\\",\\"LocalPath\\":\\"/opt/ml/processing/output\\",\\"S3UploadMode\\":\\"EndOfJob\\"}}开发}}]"
+
+echo "=== Job submitted successfully. Waiting for completion... ==="
+aws sagemaker wait processing-job-completed-or-stopped --processing-job-name "$JOB_NAME"
+
+echo "=== [4/4] Syncing Shards and Merging Final Submission ==="
+mkdir -p output/sagemaker_shards
+aws s3 sync "s3://$BUCKET/$PREFIX/output" output/sagemaker_shards
+python sagemaker/merge_submission.py --shard-dir output/sagemaker_shards --output-dir output --test-dir student_resource/dataset/test
 """
+    # Fix escaping artifact in bash script
+    bash_script = bash_script.replace("开发", "")
     cli_path = os.path.join(PROJECT_ROOT, "sagemaker", "launch_aws_cli.sh")
     with open(cli_path, "w", encoding="utf-8") as f:
-        f.write(script_content)
+        f.write(bash_script)
     print(f"Wrote AWS CLI starter script to {cli_path}")
 
 

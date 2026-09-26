@@ -6,13 +6,13 @@ import os
 import sys
 import glob
 import subprocess
-from typing import List
+from typing import List, Optional, Dict
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.pipeline_utils import CANDIDATE_HEADER, MATCHING_HEADER
+from scripts.pipeline_utils import CANDIDATE_HEADER, MATCHING_HEADER, DELIM
 
 
 def merge_shards(
@@ -22,7 +22,8 @@ def merge_shards(
     validate: bool = True,
 ) -> bool:
     """
-    Concatenate all partition outputs into final submission files and validate.
+    Concatenate all partition outputs into final submission files,
+    preserving exact deterministic order and validating against competition rules.
     """
     os.makedirs(output_dir, exist_ok=True)
     final_cand_path = os.path.join(output_dir, "candidate_pairs.tsv")
@@ -35,27 +36,72 @@ def merge_shards(
     cand_shards = [s for s in cand_shards if os.path.abspath(s) != os.path.abspath(final_cand_path)]
     match_shards = [s for s in match_shards if os.path.abspath(s) != os.path.abspath(final_match_path)]
 
-    print(f"Merging {len(cand_shards)} candidate shards and {len(match_shards)} matching shards...")
+    print(f"Merging {len(cand_shards)} candidate shards and {len(match_shards)} matching shards from {shard_dir}...")
 
-    total_cand_rows = 0
+    # Load expected S1 ID order if test_source1.tsv exists
+    s1_order: List[str] = []
+    if test_dir:
+        s1_file = os.path.join(test_dir, "test_source1.tsv")
+        if os.path.isfile(s1_file):
+            with open(s1_file, "r", encoding="utf-8") as f:
+                next(f, None)  # Skip header
+                for line in f:
+                    parts = line.split("\t", 1)
+                    if parts and parts[0].strip():
+                        s1_order.append(parts[0].strip())
+            print(f"Loaded {len(s1_order):,} expected S1 entity IDs from {s1_file}")
+
+    # Read candidate lines
+    cand_map: Dict[str, str] = {}
+    for s_path in cand_shards:
+        with open(s_path, "r", encoding="utf-8") as f_in:
+            next(f_in, None)  # Skip header
+            for line in f_in:
+                parts = line.partition(DELIM)
+                if parts[1]:
+                    cand_map[parts[0]] = line
+
+    # Write merged candidates
     with open(final_cand_path, "w", encoding="utf-8", newline="") as f_out:
         f_out.write(CANDIDATE_HEADER)
-        for s_path in cand_shards:
-            with open(s_path, "r", encoding="utf-8") as f_in:
-                next(f_in, None)  # Skip header
-                for line in f_in:
-                    f_out.write(line)
-                    total_cand_rows += 1
+        if s1_order:
+            for s1_id in s1_order:
+                if s1_id in cand_map:
+                    f_out.write(cand_map[s1_id])
+                else:
+                    f_out.write(f"{s1_id}{DELIM}\n")
+        else:
+            for s1_id in sorted(cand_map.keys()):
+                f_out.write(cand_map[s1_id])
 
-    total_match_rows = 0
+    total_cand_rows = len(s1_order) if s1_order else len(cand_map)
+    del cand_map  # Free memory
+
+    # Read matching lines
+    match_map: Dict[str, str] = {}
+    for s_path in match_shards:
+        with open(s_path, "r", encoding="utf-8") as f_in:
+            next(f_in, None)  # Skip header
+            for line in f_in:
+                parts = line.partition(DELIM)
+                if parts[1]:
+                    match_map[parts[0]] = line
+
+    # Write merged matches
     with open(final_match_path, "w", encoding="utf-8", newline="") as f_out:
         f_out.write(MATCHING_HEADER)
-        for s_path in match_shards:
-            with open(s_path, "r", encoding="utf-8") as f_in:
-                next(f_in, None)  # Skip header
-                for line in f_in:
-                    f_out.write(line)
-                    total_match_rows += 1
+        if s1_order:
+            for s1_id in s1_order:
+                if s1_id in match_map:
+                    f_out.write(match_map[s1_id])
+                else:
+                    f_out.write(f"{s1_id}{DELIM}\n")
+        else:
+            for s1_id in sorted(match_map.keys()):
+                f_out.write(match_map[s1_id])
+
+    total_match_rows = len(s1_order) if s1_order else len(match_map)
+    del match_map  # Free memory
 
     print(f"Merged candidate_pairs.tsv: {total_cand_rows:,} rows ({os.path.getsize(final_cand_path) / (1024**2):.1f} MB)")
     print(f"Merged matching_results.tsv: {total_match_rows:,} rows ({os.path.getsize(final_match_path) / (1024**2):.1f} MB)")
