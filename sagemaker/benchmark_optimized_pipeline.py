@@ -12,9 +12,18 @@ import json
 import numpy as np
 from typing import Dict, List, Any
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+if "sagemaker" in sys.modules:
+    sagemaker_pkg = sys.modules["sagemaker"]
+    if hasattr(sagemaker_pkg, "__path__") and CURRENT_DIR not in sagemaker_pkg.__path__:
+        sagemaker_pkg.__path__.insert(0, CURRENT_DIR)
 
 from scripts.pipeline_utils import (
     DELIM,
@@ -26,7 +35,11 @@ from scripts.pipeline_utils import (
 )
 from business_entity_resolution.src.normalization import normalize_record
 from business_entity_resolution.src.model import FastLogisticRegression
-from sagemaker.vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
+
+try:
+    from vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
+except ImportError:
+    from sagemaker.vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
 
 
 def run_benchmark(

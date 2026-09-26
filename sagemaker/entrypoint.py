@@ -9,11 +9,22 @@ import sys
 import json
 import time
 import argparse
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+# If 'sagemaker' package is in sys.modules (from installed AWS SageMaker SDK),
+# extend its __path__ so 'sagemaker.vectorized_matcher' can also be resolved
+if "sagemaker" in sys.modules:
+    sagemaker_pkg = sys.modules["sagemaker"]
+    if hasattr(sagemaker_pkg, "__path__") and CURRENT_DIR not in sagemaker_pkg.__path__:
+        sagemaker_pkg.__path__.insert(0, CURRENT_DIR)
 
 from scripts.pipeline_utils import (
     DELIM,
@@ -23,7 +34,11 @@ from scripts.pipeline_utils import (
     stream_tsv_records,
 )
 from business_entity_resolution.src.model import FastLogisticRegression
-from sagemaker.vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
+
+try:
+    from vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
+except ImportError:
+    from sagemaker.vectorized_matcher import CompactInvertedIndex, process_s1_batch_vectorized
 
 
 def load_model(model_path: str):
