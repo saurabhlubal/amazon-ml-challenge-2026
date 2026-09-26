@@ -102,6 +102,28 @@ def build_mock_indexes(s2_path: str, s3_path: str, max_records: Optional[int] = 
     return {"name_index": name_index, "records": record_store}
 
 
+def load_and_index_candidates(
+    s2_path: str,
+    s3_path: str,
+    max_records: Optional[int] = None,
+    max_bucket_size: int = 500
+) -> Dict[str, Any]:
+    """Stream candidate records from Source 2 and Source 3 and build multi-key inverted index."""
+    from business_entity_resolution.src.blocking import build_blocking_indexes
+
+    def records_generator():
+        count = 0
+        for p in (s2_path, s3_path):
+            if os.path.isfile(p):
+                for rec in stream_tsv_records(p):
+                    yield rec
+                    count += 1
+                    if max_records and count >= max_records:
+                        return
+
+    return build_blocking_indexes(records_generator(), max_bucket_size=max_bucket_size)
+
+
 def run_pipeline(
     test_dir: str,
     output_dir: str,
@@ -152,7 +174,8 @@ def run_pipeline(
         fn_features = build_features
         fn_predict = predict_scores
         fn_decide = decide_matches
-        indexes = {}
+        print("Building multi-key blocking indexes from Source 2 and Source 3...")
+        indexes = load_and_index_candidates(s2_path, s3_path, max_records=max_records)
         model = None
 
     # 2. Process Source 1 and stream outputs
