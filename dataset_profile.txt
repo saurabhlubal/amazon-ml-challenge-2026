@@ -1,0 +1,113 @@
+
+======================================================================
+SOURCE 1
+======================================================================
+Rows: 2,206,821
+Columns: ['entity_id', 'business_name', 'business_address', 'country']
+
+Missing values:
+  entity_id: 0 (0.00%)
+  business_name: 0 (0.00%)
+  business_address: 0 (0.00%)
+  country: 0 (0.00%)
+
+Countries:
+  US: 1,323,633 (59.98%)
+  India: 883,188 (40.02%)
+
+Duplicate entity IDs: 0
+
+First 3 records:
+{'entity_id': 'S1-925783039', 'business_name': "Orelee's Barbershop", 'business_address': '1795 Westchester Drive, High Point, NC', 'country': 'US'}
+{'entity_id': 'S1-773889195', 'business_name': 'Prime Money', 'business_address': '17560 Ellis Road, Tahlequah, OK', 'country': 'US'}
+{'entity_id': 'S1-377745466', 'business_name': 'B+ Retail Inc', 'business_address': '1712 Montebello Avenue, Phoenix, AZ', 'country': 'US'}
+
+======================================================================
+SOURCE 2
+======================================================================
+Rows: 5,034,616
+Columns: ['entity_id', 'business_name', 'business_address', 'country']
+
+Missing values:
+  entity_id: 0 (0.00%)
+  business_name: 0 (0.00%)
+  business_address: 168,967 (3.36%)
+  country: 0 (0.00%)
+
+Countries:
+  US: 3,016,817 (59.92%)
+  India: 2,017,799 (40.08%)
+
+Duplicate entity IDs: 0
+
+First 3 records:
+{'entity_id': 'S2-166376419', 'business_name': 'राम मार्केटिंग प्राइवेट लिमिटेड', 'business_address': 'KH NO. -570/13, NEW DELHI, WEST DELHI, Delhi', 'country': 'India'}
+{'entity_id': 'S2-764573417', 'business_name': '-- Holloway Peak Inc Seafood', 'business_address': '105 ELM ST, MORGANTON, NC', 'country': 'US'}
+{'entity_id': 'S2-639257739', 'business_name': 'आदित्य प्रॉपर्टीज एलएलपी', 'business_address': 'G-3/571, GULMOHAR COLONY, BHOPAL, Madhya Pradesh', 'country': 'India'}
+
+======================================================================
+SOURCE 3
+======================================================================
+Rows: 5,285,603
+Columns: ['entity_id', 'business_name', 'business_address', 'country']
+
+Missing values:
+  entity_id: 0 (0.00%)
+  business_name: 0 (0.00%)
+  business_address: 175,916 (3.33%)
+  country: 0 (0.00%)
+
+Countries:
+  US: 3,170,056 (59.98%)
+  India: 2,115,547 (40.02%)
+
+Duplicate entity IDs: 0
+
+First 3 records:
+{'entity_id': 'S3-202863386', 'business_name': 'wilfordhancock.com', 'business_address': 'Mack Rd, Haltom City, Texas', 'country': 'US'}
+{'entity_id': 'S3-859268022', 'business_name': 'International South Consultants Private Ltd', 'business_address': '', 'country': 'India'}
+{'entity_id': 'S3-22467283', 'business_name': 'LLC Moncada Léarning Center', 'business_address': '5780 Fawn Ct, Fort Worth, Texas', 'country': 'US'}
+
+======================================================================
+GROUND TRUTH
+======================================================================
+Rows: 2,206,821
+Columns: ['source1_entity_id', 'matched_entity_ids']
+
+Matches per Source-1 entity:
+  Minimum: 0
+  Maximum: 11
+  Mean: 3.46
+  Median: 3
+
+Match-count distribution:
+  0 matches: 123,247
+  1 matches: 119,157
+  2 matches: 375,212
+  3 matches: 530,841
+  4 matches: 484,115
+  5 matches: 321,957
+  6 matches: 164,868
+  7 matches: 63,968
+  8 matches: 18,680
+  9 matches: 4,205
+  10 matches: 534
+  11 matches: 37
+
+Source-specific matches:
+  Total S2 matches: 3,693,619
+  Total S3 matches: 3,944,746
+  Average S2 matches per S1: 1.67
+  Average S3 matches per S1: 1.79
+
+First 10 ground-truth records:
+S1-965667 -> S2-681193310,S2-743505751,S3-775321672,S3-11291185,S3-860443364
+S1-55344266 -> S2-249013014,S2-197070651,S3-478195123,S3-384364074
+S1-343815751 -> S2-790675320,S2-479876582,S3-878454467
+S1-656753428 -> S2-153058913,S2-24659151,S3-679606215
+S1-102811957 -> S2-478959098,S2-553508714,S2-625774905,S3-728090388,S3-928796641,S3-449308785
+S1-18727616 -> S2-755677256,S3-187831601,S3-641489370,S3-476250621
+S1-318373630 -> S2-660036492,S3-804600254
+S1-86989137 -> S3-274817120,S3-312496301
+S1-29845983 -> S2-648035184,S3-588502663
+S1-789009573 -> S2-383871912,S3-74481402,S3-576451439

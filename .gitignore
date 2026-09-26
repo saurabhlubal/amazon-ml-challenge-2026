@@ -1,0 +1,37 @@
+# Dataset - NEVER commit
+student_resource/dataset/
+
+# macOS extraction metadata
+__MACOSX/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+output/
+*.log
+
+# Experiment artifacts
+experiments/results/
+*.pkl
+*.joblib
+*.model
+
+# Temporary files
+tmp/
+temp/
