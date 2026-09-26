@@ -10,22 +10,81 @@ from array import array
 from typing import Dict, List, Set, Tuple, Any, Optional
 import numpy as np
 
-from business_entity_resolution.src.normalization import normalize_record
+from business_entity_resolution.src.normalization import normalize_record, extract_char_shingles
 from business_entity_resolution.src.blocking import get_blocking_keys
 from business_entity_resolution.src.model import FastLogisticRegression, predict_scores, decide_matches
-from scripts.pipeline_utils import DELIM, format_id_list
+from scripts.pipeline_utils import DELIM, CANDIDATE_HEADER, MATCHING_HEADER, format_id_list
+
+
+class CompactCand:
+    """
+    Ultra-compact candidate record representation using __slots__.
+    Eliminates per-instance Python dict overhead (~232 bytes -> ~88 bytes),
+    and evaluates char_shingles lazily only for candidates passing cheap pre-filtering.
+    """
+    __slots__ = (
+        "entity_id",
+        "raw_business_name",
+        "business_name",
+        "name_signature",
+        "business_address",
+        "country",
+        "compact_name",
+        "name_tokens_set",
+        "address_tokens_set",
+        "address_numbers",
+    )
+
+    def __init__(
+        self,
+        entity_id: str,
+        raw_business_name: str,
+        business_name: str,
+        name_signature: str,
+        business_address: str,
+        country: str,
+        compact_name: str,
+        name_tokens_set: Set[str],
+        address_tokens_set: Set[str],
+        address_numbers: Set[str],
+    ):
+        self.entity_id = entity_id
+        self.raw_business_name = raw_business_name
+        self.business_name = business_name
+        self.name_signature = name_signature
+        self.business_address = business_address
+        self.country = country
+        self.compact_name = compact_name
+        self.name_tokens_set = name_tokens_set
+        self.address_tokens_set = address_tokens_set
+        self.address_numbers = address_numbers
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if hasattr(self, key):
+            val = getattr(self, key)
+            return val if val is not None else default
+        return default
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    @property
+    def char_shingles(self) -> List[str]:
+        # Evaluated on-demand ONLY for promising candidates scored with FastLogisticRegression
+        return extract_char_shingles(self.compact_name, 3)
 
 
 class CompactInvertedIndex:
     """
     Compact, high-speed in-memory inverted index for Source 2 and Source 3 candidate records.
     Uses array('I') (4 bytes per candidate ID reference) for zero disk I/O and O(1) lookups.
+    Stores candidates using CompactCand (__slots__) for bounded heap consumption.
     """
 
     def __init__(self, max_bucket_size: int = 300):
         self.max_bucket_size = max_bucket_size
         self.key_to_cand_idxs: Dict[str, array] = {}
-        self.cand_records: List[Dict[str, Any]] = []
+        self.cand_records: List[Any] = []
         self.cand_eids: List[str] = []
 
     def add_record(self, raw_record: Dict[str, Any], strategy: str = "combined") -> None:
@@ -35,18 +94,18 @@ class CompactInvertedIndex:
 
         norm = normalize_record(raw_record)
         cand_idx = len(self.cand_records)
-        compact_cand = {
-            "entity_id": eid,
-            "raw_business_name": norm.get("raw_business_name", ""),
-            "business_name": norm.get("business_name", ""),
-            "name_signature": norm.get("name_signature", ""),
-            "business_address": norm.get("business_address", ""),
-            "country": norm.get("country", ""),
-            "name_tokens_set": norm.get("name_tokens_set", set()),
-            "address_tokens_set": norm.get("address_tokens_set", set()),
-            "address_numbers": norm.get("address_numbers", set()),
-            "char_shingles": norm.get("char_shingles", []),
-        }
+        compact_cand = CompactCand(
+            entity_id=eid,
+            raw_business_name=norm.get("raw_business_name", ""),
+            business_name=norm.get("business_name", ""),
+            name_signature=norm.get("name_signature", ""),
+            business_address=norm.get("business_address", ""),
+            country=norm.get("country", ""),
+            compact_name=norm.get("compact_name", ""),
+            name_tokens_set=norm.get("name_tokens_set", set()),
+            address_tokens_set=norm.get("address_tokens_set", set()),
+            address_numbers=norm.get("address_numbers", set()),
+        )
         self.cand_records.append(compact_cand)
         self.cand_eids.append(eid)
 
@@ -257,3 +316,82 @@ def process_s1_batch_vectorized(
         results.append((s1_id, all_cand_eids, sorted(matched_eids)))
 
     return results
+
+
+def merge_chunk_outputs(
+    cand_chunk_files: List[str],
+    match_chunk_files: List[str],
+    final_cand_path: str,
+    final_match_path: str,
+) -> Tuple[int, int, int]:
+    """
+    Streaming k-way merge of candidate and matching chunk files.
+    Reads 1 line from each chunk file at a time, keeping RAM bounded (< 1 MB).
+    Deduplicates IDs, sorts lexicographically, and guarantees candidate-subset rule.
+    """
+    total_s1 = 0
+    total_candidates = 0
+    total_matches = 0
+
+    with open(final_cand_path, "w", encoding="utf-8", newline="") as f_cand_out, \
+         open(final_match_path, "w", encoding="utf-8", newline="") as f_match_out:
+
+        f_cand_out.write(CANDIDATE_HEADER)
+        f_match_out.write(MATCHING_HEADER)
+
+        cand_fps = [open(p, "r", encoding="utf-8") for p in cand_chunk_files]
+        match_fps = [open(p, "r", encoding="utf-8") for p in match_chunk_files]
+
+        try:
+            for cand_lines, match_lines in zip(zip(*cand_fps), zip(*match_fps)):
+                s1_id = None
+                all_cands: Set[str] = set()
+                all_matches: Set[str] = set()
+
+                for line in cand_lines:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    sid, delim, rest = line.partition("\t")
+                    if s1_id is None:
+                        s1_id = sid
+                    if rest:
+                        for cid in rest.split(","):
+                            cid = cid.strip()
+                            if cid:
+                                all_cands.add(cid)
+
+                for line in match_lines:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    sid, delim, rest = line.partition("\t")
+                    if s1_id is None:
+                        s1_id = sid
+                    if rest:
+                        for mid in rest.split(","):
+                            mid = mid.strip()
+                            if mid:
+                                all_matches.add(mid)
+
+                # Strict candidate-subset enforcement:
+                # Any match MUST be in candidates
+                valid_matches = all_matches.intersection(all_cands) if all_matches else set()
+
+                sorted_cands = sorted(all_cands)
+                sorted_matches = sorted(valid_matches)
+
+                f_cand_out.write(f"{s1_id}{DELIM}{format_id_list(sorted_cands)}\n")
+                f_match_out.write(f"{s1_id}{DELIM}{format_id_list(sorted_matches)}\n")
+
+                total_s1 += 1
+                total_candidates += len(sorted_cands)
+                total_matches += len(sorted_matches)
+        finally:
+            for fp in cand_fps:
+                fp.close()
+            for fp in match_fps:
+                fp.close()
+
+    return total_s1, total_candidates, total_matches
+
