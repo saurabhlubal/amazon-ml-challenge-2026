@@ -4,7 +4,7 @@ set -euo pipefail
 
 BUCKET="amazon-ml-challenge-2026-saurabh"
 PREFIX="entity_resolution"
-INST_TYPE="ml.c5.18xlarge"
+INST_TYPE="ml.c5.4xlarge"
 INST_COUNT=4
 ROLE="${SAGEMAKER_ROLE:-arn:aws:iam::123456789012:role/service-role/AmazonSageMaker-ExecutionRole}"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"

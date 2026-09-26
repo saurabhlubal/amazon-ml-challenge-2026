@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
 def launch_pipeline(
     s3_bucket: str,
     s3_prefix: str = "amazon_ml_2026",
-    instance_type: str = "ml.c5.18xlarge",
+    instance_type: str = "ml.c5.4xlarge",
     instance_count: int = 4,
     role_arn: Optional[str] = None,
     local_test_dir: str = "student_resource/dataset/test",
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Launch Amazon ML SageMaker Production Pipeline")
     parser.add_argument("--s3-bucket", default="amazon-ml-challenge-2026-saurabh")
     parser.add_argument("--s3-prefix", default="entity_resolution")
-    parser.add_argument("--instance-type", default="ml.c5.18xlarge")
+    parser.add_argument("--instance-type", default="ml.c5.4xlarge")
     parser.add_argument("--instance-count", type=int, default=4)
     parser.add_argument("--role-arn", default=None)
     parser.add_argument("--dry-run", action="store_true", help="Validate setup without submitting cloud job")
