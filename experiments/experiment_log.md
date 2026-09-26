@@ -12,3 +12,4 @@
 | E01 | 2026-09-26 20:23:12 | `feature/ml-matching` | LightGBM | 48 signals | Thresh=0.38 | **0.9965** | Prec=0.9968, Rec=0.9965 | Pos + Hard Negatives + Singleton Distractors | Keep |
 | E01 | 2026-09-26 20:23:23 | `feature/ml-matching` | LightGBM | 48 signals | Thresh=0.56 | **0.9961** | Prec=0.9971, Rec=0.9942 | Pos + Hard Negatives + Singleton Distractors | Keep |
 | E01 | 2026-09-26 20:24:37 | `feature/ml-matching` | LightGBM | 48 signals | Thresh=0.24 | **0.9963** | Prec=0.9966, Rec=0.9965 | Pos + Hard Negatives + Singleton Distractors | Keep |
+| E01 | 2026-09-26 20:28:14 | `feature/ml-matching` | LightGBM | 48 signals | Thresh=0.52 | **0.9955** | Prec=0.9962, Rec=0.9942 | Pos + Hard Negatives + Singleton Distractors | Keep |
