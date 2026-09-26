@@ -1,0 +1,39 @@
+{
+  "model_type": "FastLogisticRegression",
+  "weights": [
+    0.032207990484688455,
+    0.1837412408277673,
+    0.24090746833361001,
+    0.36012796530863117,
+    0.29392716557414644,
+    0.4148256841962887,
+    -0.09988975825425402,
+    0.07250032930133739,
+    0.1335610134848176,
+    0.7382362840924388,
+    0.8933763692983768,
+    0.6831571640290615,
+    0.0002249556022369815
+  ],
+  "bias": -1.6574706472291847,
+  "feature_names": [
+    "name_exact_raw",
+    "name_exact_norm",
+    "name_sig_match",
+    "name_jaccard",
+    "name_containment",
+    "name_ngram_jaccard",
+    "name_len_diff",
+    "addr_is_empty",
+    "addr_exact_norm",
+    "addr_jaccard",
+    "addr_containment",
+    "addr_num_overlap",
+    "country_match"
+  ],
+  "optimal_threshold": 0.5,
+  "macro_f05": 0.9334265395369176,
+  "precision": 0.9903019616486666,
+  "recall": 0.860727969348659,
+  "trained_date": "2026-09-26 20:24:19"
+}
