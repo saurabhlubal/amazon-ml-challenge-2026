@@ -233,12 +233,14 @@ def find_optimal_threshold(
             predictions[s1] = {cid for cid, _ in valid_cands}
 
         metrics = evaluate_predictions_detailed(ground_truth, predictions)
-        sweep_history.append({
-            "threshold": t_val,
-            "macro_f05": metrics["macro_f05"],
-            "macro_precision": metrics["macro_precision"],
-            "macro_recall": metrics["macro_recall"],
-        })
+        sweep_history.append(
+            {
+                "threshold": t_val,
+                "macro_f05": metrics["macro_f05"],
+                "macro_precision": metrics["macro_precision"],
+                "macro_recall": metrics["macro_recall"],
+            }
+        )
 
         if metrics["macro_f05"] > best_res["macro_f05"]:
             best_res = metrics
@@ -308,9 +310,11 @@ def apply_decision_rule(
     rows = []
     for s1 in all_s1_ids:
         c_list = matches_map.get(s1, [])
-        rows.append({
-            "source1_entity_id": s1,
-            "matched_entity_ids": ",".join(c_list),
-        })
+        rows.append(
+            {
+                "source1_entity_id": s1,
+                "matched_entity_ids": ",".join(c_list),
+            }
+        )
 
     return pd.DataFrame(rows)

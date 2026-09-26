@@ -15,9 +15,8 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
-import numpy as np
 import pandas as pd
 
 # Add workspace root to sys.path
@@ -86,7 +85,9 @@ def score_and_export_predictions(
                     needed_cand_ids.add(cid)
 
     pairs_df = pd.DataFrame(pair_rows, columns=["source1_entity_id", "candidate_entity_id"])
-    print(f"Total candidate pairs to score: {len(pairs_df):,} across {len(needed_cand_ids):,} unique candidates.")
+    print(
+        f"Total candidate pairs to score: {len(pairs_df):,} across {len(needed_cand_ids):,} unique candidates."
+    )
 
     # 3. Load Candidate Records (only needed IDs)
     cand_dict: Dict[str, Dict[str, Any]] = {}
@@ -113,14 +114,18 @@ def score_and_export_predictions(
     t_feat = time.time()
     features_df = extract_features_from_df(pairs_df, s1_dict, cand_dict)
     feat_time = time.time() - t_feat
-    print(f"Extracted {len(features_df):,} feature rows in {feat_time:.2f}s ({len(features_df)/max(0.001, feat_time):.0f} pairs/sec).")
+    print(
+        f"Extracted {len(features_df):,} feature rows in {feat_time:.2f}s ({len(features_df)/max(0.001, feat_time):.0f} pairs/sec)."
+    )
 
     # 5. Predict scores
     print("Running model inference...")
     t_inf = time.time()
     scores = matcher.predict_in_batches(features_df, batch_size=batch_size)
     inf_time = time.time() - t_inf
-    print(f"Scored {len(scores):,} pairs in {inf_time:.3f}s ({len(scores)/max(0.001, inf_time):.0f} pairs/sec).")
+    print(
+        f"Scored {len(scores):,} pairs in {inf_time:.3f}s ({len(scores)/max(0.001, inf_time):.0f} pairs/sec)."
+    )
 
     pairs_df["score"] = scores
 
@@ -146,15 +151,29 @@ def score_and_export_predictions(
 
     # 7. Official submission validation check
     validator_path = os.path.join(WORKSPACE_ROOT, "student_resource", "utils", "validate_submission.py")
+    if not os.path.exists(validator_path):
+        downloads_val = os.path.join(
+            os.path.expanduser("~/Downloads"),
+            "amazon-dataset",
+            "student_resource",
+            "utils",
+            "validate_submission.py",
+        )
+        if os.path.exists(downloads_val):
+            validator_path = downloads_val
+
     if validate and os.path.exists(validator_path):
-        print("\nRunning official submission validator...")
+        print(f"\nRunning official submission validator ({validator_path})...")
         td = test_dir or os.path.dirname(os.path.abspath(s1_path))
         cmd = [
             sys.executable,
             validator_path,
-            "--matching", matching_out_path,
-            "--candidate", cand_out_path,
-            "--test-dir", td,
+            "--matching",
+            matching_out_path,
+            "--candidate",
+            cand_out_path,
+            "--test-dir",
+            td,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         print(proc.stdout)
@@ -173,12 +192,36 @@ def score_and_export_predictions(
 
 
 def main():
+    # Smart default discovery for test set
+    default_test_dir = None
+    for candidate_dir in [
+        os.path.join(
+            os.path.expanduser("~/Downloads"), "amazon-dataset", "student_resource", "dataset", "test"
+        ),
+        os.path.join(WORKSPACE_ROOT, "student_resource", "dataset", "test"),
+    ]:
+        if os.path.isdir(candidate_dir) and os.path.exists(os.path.join(candidate_dir, "test_source1.tsv")):
+            default_test_dir = candidate_dir
+            break
+
+    default_s1 = os.path.join(default_test_dir, "test_source1.tsv") if default_test_dir else None
+    default_s2 = os.path.join(default_test_dir, "test_source2.tsv") if default_test_dir else None
+    default_s3 = os.path.join(default_test_dir, "test_source3.tsv") if default_test_dir else None
+
     parser = argparse.ArgumentParser(description="Score candidates and generate final submission TSVs.")
-    parser.add_argument("--s1", required=True, help="Path to test_source1.tsv")
-    parser.add_argument("--s2", required=True, help="Path to test_source2.tsv")
-    parser.add_argument("--s3", required=True, help="Path to test_source3.tsv")
+    parser.add_argument(
+        "--s1", default=default_s1, required=default_s1 is None, help="Path to test_source1.tsv"
+    )
+    parser.add_argument(
+        "--s2", default=default_s2, required=default_s2 is None, help="Path to test_source2.tsv"
+    )
+    parser.add_argument(
+        "--s3", default=default_s3, required=default_s3 is None, help="Path to test_source3.tsv"
+    )
     parser.add_argument("--candidate-pairs", required=True, help="Path to candidate_pairs.tsv")
-    parser.add_argument("--model", default="experiments/results/entity_matcher.pkl", help="Path to trained model")
+    parser.add_argument(
+        "--model", default="experiments/results/entity_matcher.pkl", help="Path to trained model"
+    )
     parser.add_argument("--output-dir", default="output", help="Directory for output TSVs")
     parser.add_argument("--threshold", type=float, default=0.50, help="Probability threshold for matching")
     parser.add_argument("--max-matches", type=int, default=None, help="Max matches allowed per S1")

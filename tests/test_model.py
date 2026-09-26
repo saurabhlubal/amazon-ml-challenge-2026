@@ -3,10 +3,15 @@ Unit tests for business_entity_resolution/src/model.py.
 """
 
 import os
+import sys
 import tempfile
 import unittest
+
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if WORKSPACE_ROOT not in sys.path:
+    sys.path.insert(0, WORKSPACE_ROOT)
+
 import numpy as np
-import pandas as pd
 from business_entity_resolution.src.model import (
     EntityMatcher,
     train_model,

@@ -2,26 +2,24 @@
 Unit tests for business_entity_resolution/src/features.py.
 """
 
+import os
+import sys
 import unittest
+
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if WORKSPACE_ROOT not in sys.path:
+    sys.path.insert(0, WORKSPACE_ROOT)
+
 import numpy as np
 from business_entity_resolution.src.features import (
     FEATURE_NAMES,
-    ParsedRecord,
     build_features,
-    build_features_from_parsed,
-    clean_text,
-    get_tokens,
-    get_digits,
-    levenshtein_sim,
-    jaccard_similarity,
-    dice_similarity,
-    overlap_coefficient,
 )
 
 
 class TestFeatures(unittest.TestCase):
     def test_feature_count_and_keys(self):
-        """Verify that build_features returns exactly the expected 46 feature keys."""
+        """Verify that build_features returns exactly the expected 48 feature keys."""
         r1 = {
             "entity_id": "S1-100",
             "business_name": "Apex Technology Corp",
@@ -36,6 +34,7 @@ class TestFeatures(unittest.TestCase):
         }
         feats = build_features(r1, r2)
         self.assertEqual(len(feats), len(FEATURE_NAMES))
+        self.assertEqual(len(FEATURE_NAMES), 48)
         self.assertEqual(set(feats.keys()), set(FEATURE_NAMES))
         for k, v in feats.items():
             self.assertIsInstance(v, (int, float), f"Feature {k} is not numeric: {v}")
@@ -57,6 +56,8 @@ class TestFeatures(unittest.TestCase):
         self.assertEqual(f["country_mismatch"], 0.0)
         self.assertEqual(f["name_levenshtein_sim"], 1.0)
         self.assertEqual(f["name_token_jaccard"], 1.0)
+        self.assertEqual(f["name_char_3gram_jaccard"], 1.0)
+        self.assertEqual(f["address_char_3gram_jaccard"], 1.0)
         self.assertEqual(f["name_length_diff"], 0.0)
         self.assertEqual(f["name_length_ratio"], 1.0)
         self.assertEqual(f["num_primary_match"], 1.0)
@@ -79,6 +80,22 @@ class TestFeatures(unittest.TestCase):
         self.assertAlmostEqual(f["address_norm_token_jaccard"], 1.0, places=5)
         # Core tokens without legal suffix should also match perfectly
         self.assertAlmostEqual(f["name_core_token_jaccard"], 1.0, places=5)
+
+        # French legal & street normalization test
+        rf1 = {
+            "business_name": "Thermal & Fils SASU",
+            "business_address": "20 Boulevard Saint-Germain, Paris",
+            "country": "France",
+        }
+        rf2 = {
+            "business_name": "Thermal et Fils SAS",
+            "business_address": "20 Blvd Saint-Germain, Paris",
+            "country": "France",
+        }
+        ff = build_features(rf1, rf2)
+        self.assertAlmostEqual(ff["name_norm_token_jaccard"], 1.0, places=5)
+        self.assertAlmostEqual(ff["address_norm_token_jaccard"], 1.0, places=5)
+        self.assertGreater(ff["name_char_3gram_jaccard"], 0.6)
 
     def test_missing_address_handling(self):
         """Verify that missing addresses set flags and default similarities safely to 0.0."""

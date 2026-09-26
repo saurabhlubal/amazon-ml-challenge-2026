@@ -2,8 +2,14 @@
 Unit tests for business_entity_resolution/src/evaluation.py.
 """
 
+import os
+import sys
 import unittest
-import numpy as np
+
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if WORKSPACE_ROOT not in sys.path:
+    sys.path.insert(0, WORKSPACE_ROOT)
+
 import pandas as pd
 from business_entity_resolution.src.evaluation import (
     f05,
@@ -97,21 +103,21 @@ class TestEvaluation(unittest.TestCase):
         # S1-1 predicts {S2-1} -> F0.5 = 1.0
         # S1-2 predicts set() -> F0.5 = 1.0
         # Macro F0.5 = 1.0!
-        res = find_optimal_threshold(
-            s1_ids, cand_ids, probs, gt, threshold_range=(0.30, 0.90, 0.05)
-        )
+        res = find_optimal_threshold(s1_ids, cand_ids, probs, gt, threshold_range=(0.30, 0.90, 0.05))
         self.assertAlmostEqual(res["best_f05"], 1.0)
         self.assertGreaterEqual(res["best_threshold"], 0.61)
         self.assertLessEqual(res["best_threshold"], 0.85)
 
     def test_apply_decision_rule(self):
         """Verify apply_decision_rule produces exact submission columns and handles singletons."""
-        scored_df = pd.DataFrame([
-            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-10", "score": 0.85},
-            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-20", "score": 0.92},
-            {"source1_entity_id": "S1-1", "candidate_entity_id": "S3-30", "score": 0.35},
-            {"source1_entity_id": "S1-2", "candidate_entity_id": "S2-40", "score": 0.20},
-        ])
+        scored_df = pd.DataFrame(
+            [
+                {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-10", "score": 0.85},
+                {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-20", "score": 0.92},
+                {"source1_entity_id": "S1-1", "candidate_entity_id": "S3-30", "score": 0.35},
+                {"source1_entity_id": "S1-2", "candidate_entity_id": "S2-40", "score": 0.20},
+            ]
+        )
         all_s1 = ["S1-1", "S1-2", "S1-3"]  # S1-3 has no candidates at all
 
         df_out = apply_decision_rule(scored_df, all_s1, threshold=0.70)

@@ -15,6 +15,7 @@ import collections
 import glob
 import json
 import os
+import pickle
 import random
 import sys
 import time
@@ -32,12 +33,11 @@ if WORKSPACE_ROOT not in sys.path:
 from business_entity_resolution.src.features import (
     FEATURE_NAMES,
     ParsedRecord,
-    build_features,
     build_features_from_parsed,
     clean_text,
     get_tokens,
 )
-from business_entity_resolution.src.model import EntityMatcher, decide_matches
+from business_entity_resolution.src.model import EntityMatcher
 from business_entity_resolution.src.evaluation import (
     evaluate_predictions_detailed,
     find_optimal_threshold,
@@ -55,12 +55,21 @@ def find_dataset_source(explicit_path: Optional[str] = None) -> Tuple[str, bool]
     if explicit_path and os.path.exists(explicit_path):
         return explicit_path, zipfile.is_zipfile(explicit_path)
 
-    # Check local student_resource/dataset/train
+    # 1. Check uncompressed amazon-dataset folder in Downloads
+    downloads_extracted = os.path.join(
+        os.path.expanduser("~/Downloads"), "amazon-dataset", "student_resource", "dataset", "train"
+    )
+    if os.path.isdir(downloads_extracted) and os.path.exists(
+        os.path.join(downloads_extracted, "train_ground_truth.tsv")
+    ):
+        return downloads_extracted, False
+
+    # 2. Check local student_resource/dataset/train
     local_dir = os.path.join(WORKSPACE_ROOT, "student_resource", "dataset", "train")
     if os.path.isdir(local_dir) and os.path.exists(os.path.join(local_dir, "train_ground_truth.tsv")):
         return local_dir, False
 
-    # Check downloads for zip file
+    # 3. Check downloads for zip file
     downloads_dir = os.path.expanduser("~/Downloads")
     zip_matches = glob.glob(os.path.join(downloads_dir, "*student_resource*.zip"))
     for zp in zip_matches:
@@ -99,12 +108,20 @@ def load_dataset_slice(
     is_zip: bool,
     num_s1: int = 1500,
     seed: int = 42,
+    use_cache: bool = True,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Set[str]]]:
     """
     Load a stratified slice of S1 records, candidate records, and ground truth.
+    Utilizes local cache to bypass multi-gigabyte file scanning on repeated runs.
     """
     random.seed(seed)
     np.random.seed(seed)
+
+    cache_path = os.path.join(WORKSPACE_ROOT, "experiments", f".cache_slice_{num_s1}_seed_{seed}.pkl")
+    if use_cache and os.path.exists(cache_path):
+        print(f"Loading pre-sampled dataset slice from cache: {cache_path} (instant load)...")
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
 
     print(f"Loading ground truth from {data_source} (zip={is_zip})...")
 
@@ -154,7 +171,9 @@ def load_dataset_slice(
     # 1. Load S1 records
     print("Reading Source 1 records...")
     t0 = time.time()
-    for chunk in stream_tsv_chunks(data_source, is_zip, "student_resource/dataset/train/train_source1.tsv", chunksize=250_000):
+    for chunk in stream_tsv_chunks(
+        data_source, is_zip, "student_resource/dataset/train/train_source1.tsv", chunksize=250_000
+    ):
         match_chunk = chunk[chunk["entity_id"].isin(target_s1_ids)]
         for _, r in match_chunk.iterrows():
             s1_dict[r["entity_id"]] = {
@@ -208,7 +227,16 @@ def load_dataset_slice(
         print(f"Loaded {src_name} in {time.time()-t_src:.2f}s (remaining missing: {len(needed_src_ids)}).")
 
     print(f"Total candidate records ready: {len(cand_dict):,}")
-    return s1_dict, cand_dict, ground_truth
+    result = (s1_dict, cand_dict, ground_truth)
+    if use_cache:
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump(result, f)
+            print(f"Cached dataset slice to {cache_path} for rapid future runs.")
+        except Exception:
+            pass
+    return result
 
 
 def build_inverted_index(cand_dict: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -276,7 +304,9 @@ def generate_pairs_with_negatives(
         selected_negs: List[str] = []
 
         if hard_candidates:
-            selected_negs.extend(rng.sample(list(hard_candidates), min(len(hard_candidates), target_num_negs)))
+            selected_negs.extend(
+                rng.sample(list(hard_candidates), min(len(hard_candidates), target_num_negs))
+            )
 
         # Fill remaining with random negatives from candidate pool
         if len(selected_negs) < target_num_negs:
@@ -302,6 +332,7 @@ def run_experiment(
     data_path: Optional[str] = None,
     output_dir: str = "experiments/results",
     seed: int = 42,
+    use_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Run complete ML matching experiment and return detailed report.
@@ -311,7 +342,9 @@ def run_experiment(
 
     # Step 1: Locate and load data
     data_source, is_zip = find_dataset_source(data_path)
-    s1_dict, cand_dict, ground_truth = load_dataset_slice(data_source, is_zip, num_s1=num_s1, seed=seed)
+    s1_dict, cand_dict, ground_truth = load_dataset_slice(
+        data_source, is_zip, num_s1=num_s1, seed=seed, use_cache=use_cache
+    )
 
     # Step 2: Train/Validation split on S1 entities (prevents entity data leakage)
     all_s1_list = sorted(list(s1_dict.keys()))
@@ -331,8 +364,14 @@ def run_experiment(
 
     print("Generating train candidate pairs (positives + hard negatives)...")
     train_pairs, _ = generate_pairs_with_negatives(
-        train_s1_ids, s1_dict, cand_dict, ground_truth, token_index,
-        negatives_per_positive=3, singletons_negatives=4, seed=seed,
+        train_s1_ids,
+        s1_dict,
+        cand_dict,
+        ground_truth,
+        token_index,
+        negatives_per_positive=3,
+        singletons_negatives=4,
+        seed=seed,
     )
     pos_train = sum(1 for _, _, y in train_pairs if y == 1)
     neg_train = len(train_pairs) - pos_train
@@ -340,8 +379,14 @@ def run_experiment(
 
     print("Generating validation candidate pairs...")
     val_pairs, _ = generate_pairs_with_negatives(
-        val_s1_ids, s1_dict, cand_dict, ground_truth, token_index,
-        negatives_per_positive=4, singletons_negatives=4, seed=seed + 1,
+        val_s1_ids,
+        s1_dict,
+        cand_dict,
+        ground_truth,
+        token_index,
+        negatives_per_positive=4,
+        singletons_negatives=4,
+        seed=seed + 1,
     )
     pos_val = sum(1 for _, _, y in val_pairs if y == 1)
     neg_val = len(val_pairs) - pos_val
@@ -352,7 +397,9 @@ def run_experiment(
     t_parse = time.time()
     parsed_s1 = {s1: ParsedRecord(s1_dict[s1]) for s1 in s1_dict}
     parsed_cand = {cid: ParsedRecord(cand_dict[cid]) for cid in cand_dict}
-    print(f"Pre-parsed {len(parsed_s1):,} S1 and {len(parsed_cand):,} candidate entities in {time.time()-t_parse:.2f}s.")
+    print(
+        f"Pre-parsed {len(parsed_s1):,} S1 and {len(parsed_cand):,} candidate entities in {time.time()-t_parse:.2f}s."
+    )
 
     t_feat_start = time.time()
     train_feat_records = [
@@ -361,9 +408,11 @@ def run_experiment(
     X_train = pd.DataFrame(train_feat_records, columns=FEATURE_NAMES).fillna(0.0)
     y_train = np.array([y for _, _, y in train_pairs], dtype=np.int32)
     feat_train_time = time.time() - t_feat_start
-    print(f"Train feature extraction completed in {feat_train_time:.2f}s ({len(train_pairs)/max(0.001, feat_train_time):.0f} pairs/sec).")
+    print(
+        f"Train feature extraction completed in {feat_train_time:.2f}s ({len(train_pairs)/max(0.001, feat_train_time):.0f} pairs/sec)."
+    )
 
-    print(f"Extracting pairwise features for Validation pairs...")
+    print("Extracting pairwise features for Validation pairs...")
     t_val_feat_start = time.time()
     val_feat_records = [
         build_features_from_parsed(parsed_s1[s1], parsed_cand[cid]) for s1, cid, _ in val_pairs
@@ -371,7 +420,9 @@ def run_experiment(
     X_val = pd.DataFrame(val_feat_records, columns=FEATURE_NAMES).fillna(0.0)
     y_val = np.array([y for _, _, y in val_pairs], dtype=np.int32)
     feat_val_time = time.time() - t_val_feat_start
-    print(f"Validation feature extraction completed in {feat_val_time:.2f}s ({len(val_pairs)/max(0.001, feat_val_time):.0f} pairs/sec).")
+    print(
+        f"Validation feature extraction completed in {feat_val_time:.2f}s ({len(val_pairs)/max(0.001, feat_val_time):.0f} pairs/sec)."
+    )
 
     # Step 5: Train Model
     print(f"\nTraining EntityMatcher (algorithm={algorithm})...")
@@ -425,14 +476,13 @@ def run_experiment(
     # Baseline comparison at default 0.50 threshold
     pred_05 = {}
     for s1 in val_s1_ids:
-        cands = [
-            cid for (s, cid, _), p in zip(val_pairs, val_probs)
-            if s == s1 and p >= 0.50
-        ]
+        cands = [cid for (s, cid, _), p in zip(val_pairs, val_probs) if s == s1 and p >= 0.50]
         pred_05[s1] = set(cands)
     metrics_05 = evaluate_predictions_detailed(val_gt, pred_05)
-    print(f"\n  Baseline (threshold=0.50)    : F0.5={metrics_05['macro_f05']:.4f} "
-          f"(Precision={metrics_05['macro_precision']:.4f}, Recall={metrics_05['macro_recall']:.4f})")
+    print(
+        f"\n  Baseline (threshold=0.50)    : F0.5={metrics_05['macro_f05']:.4f} "
+        f"(Precision={metrics_05['macro_precision']:.4f}, Recall={metrics_05['macro_recall']:.4f})"
+    )
     print(f"  Gain from threshold tuning   : +{best_f05 - metrics_05['macro_f05']:.4f} F0.5")
 
     # Save model artifact
@@ -510,10 +560,34 @@ def run_experiment(
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate entity matcher with threshold tuning.")
-    parser.add_argument("--num-s1", type=int, default=1500, help="Number of S1 entities to sample (default: 1500)")
-    parser.add_argument("--algorithm", type=str, default="auto", choices=["auto", "lightgbm", "hist_gb", "random_forest"])
-    parser.add_argument("--data-path", type=str, default=None, help="Path to student_resource/dataset or zip archive")
-    parser.add_argument("--output-dir", type=str, default="experiments/results")
+    parser.add_argument(
+        "--num-s1",
+        "--num_s1",
+        dest="num_s1",
+        type=int,
+        default=1500,
+        help="Number of S1 entities to sample (default: 1500)",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
+    parser.add_argument(
+        "--algorithm", type=str, default="auto", choices=["auto", "lightgbm", "hist_gb", "random_forest"]
+    )
+    parser.add_argument(
+        "--data-path",
+        "--data_path",
+        dest="data_path",
+        type=str,
+        default=None,
+        help="Path to student_resource/dataset or zip archive",
+    )
+    parser.add_argument(
+        "--output-dir", "--output_dir", dest="output_dir", type=str, default="experiments/results"
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Force re-sampling directly from dataset instead of loading cache",
+    )
     args = parser.parse_args()
 
     run_experiment(
@@ -521,6 +595,8 @@ def main():
         algorithm=args.algorithm,
         data_path=args.data_path,
         output_dir=args.output_dir,
+        seed=args.seed,
+        use_cache=not args.no_cache,
     )
 
 

@@ -9,18 +9,19 @@ normalization, and multilingual Unicode safety.
 
 from __future__ import annotations
 
-import collections
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
 
 # Rapidfuzz with fallback to standard library difflib
 try:
     from rapidfuzz import fuzz, distance
+
     HAS_RAPIDFUZZ = True
 except ImportError:
     import difflib
+
     HAS_RAPIDFUZZ = False
 
 # Compiled regular expressions for speed (Unicode-aware)
@@ -28,9 +29,11 @@ RE_ALPHANUM = re.compile(r"[^\w\s]", re.UNICODE)
 RE_WHITESPACE = re.compile(r"\s+")
 RE_DIGITS = re.compile(r"\b\d+\b")
 RE_TOKEN = re.compile(r"\b\w+\b", re.UNICODE)
+RE_CONJUNCTION_ET = re.compile(r"\bet\b")
 
-# Common business legal entity abbreviations
+# Common business legal entity abbreviations (US, India, France, International)
 LEGAL_ENTITY_MAP: Dict[str, str] = {
+    # US / UK / International
     "corporation": "corp",
     "corp": "corp",
     "incorporated": "inc",
@@ -45,12 +48,20 @@ LEGAL_ENTITY_MAP: Dict[str, str] = {
     "llp": "llp",
     "plc": "plc",
     "gmbh": "gmbh",
-    "sa": "sa",
+    # France specific
     "sarl": "sarl",
+    "sas": "sas",
+    "sasu": "sas",
+    "eurl": "eurl",
+    "sci": "sci",
+    "snc": "snc",
+    "sa": "sa",
+    "fils": "fils",
 }
 
-# Common address street suffixes
+# Common address street suffixes (US, India, France)
 STREET_SUFFIX_MAP: Dict[str, str] = {
+    # Standard English / US
     "street": "st",
     "st": "st",
     "road": "rd",
@@ -59,8 +70,10 @@ STREET_SUFFIX_MAP: Dict[str, str] = {
     "dr": "dr",
     "avenue": "ave",
     "ave": "ave",
+    "av": "ave",
     "boulevard": "blvd",
     "blvd": "blvd",
+    "bd": "blvd",
     "lane": "ln",
     "ln": "ln",
     "highway": "hwy",
@@ -69,10 +82,35 @@ STREET_SUFFIX_MAP: Dict[str, str] = {
     "cir": "cir",
     "court": "ct",
     "ct": "ct",
+    "parkway": "pkwy",
+    "pkwy": "pkwy",
+    # French address terms
+    "rue": "rue",
+    "allee": "all",
+    "all": "all",
+    "chemin": "ch",
+    "ch": "ch",
+    "route": "rte",
+    "rte": "rte",
+    "impasse": "imp",
+    "imp": "imp",
+    "place": "pl",
+    "pl": "pl",
+    "square": "sq",
+    "sq": "sq",
+    "quai": "quai",
+    "cours": "cours",
+    # Indian common location tokens
+    "nagar": "ngr",
+    "colony": "clny",
+    "apartment": "apt",
+    "marg": "mrg",
+    "gali": "gali",
 }
 
 
 import unicodedata
+
 
 def strip_latin_accents(text: str) -> str:
     """Strip combining diacritics from Latin scripts (e.g. é -> e) while preserving Indic/Devanagari matras."""
@@ -85,13 +123,17 @@ def strip_latin_accents(text: str) -> str:
 
 
 def clean_text(text: Optional[str]) -> str:
-    """Standardize string: lowercase, strip Latin accents, remove punctuation, collapse whitespace (Unicode-safe)."""
+    """Standardize string: lowercase, expand '&', normalize 'et' -> 'and', strip Latin accents, remove punctuation, collapse whitespace (Unicode-safe)."""
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
+    # Standardize ampersand to 'and'
+    text = text.replace("&", " and ")
     text = strip_latin_accents(text)
     text = RE_ALPHANUM.sub(" ", text.lower())
+    # Normalize French/Spanish standalone conjunction 'et' -> 'and'
+    text = RE_CONJUNCTION_ET.sub("and", text)
     return RE_WHITESPACE.sub(" ", text).strip()
 
 
@@ -105,6 +147,13 @@ def get_digits(text: Optional[str]) -> List[str]:
     if not text:
         return []
     return RE_DIGITS.findall(str(text))
+
+
+def get_char_ngrams(text: str, n: int = 3) -> Set[str]:
+    """Extract character n-grams from string for subword similarity."""
+    if len(text) < n:
+        return {text} if text else set()
+    return {text[i : i + n] for i in range(len(text) - n + 1)}
 
 
 def normalize_legal_tokens(tokens: Sequence[str]) -> List[str]:
@@ -212,13 +261,34 @@ class ParsedRecord:
     """
     Cached, pre-tokenized record for rapid pairwise feature computation.
     """
+
     __slots__ = (
-        "entity_id", "raw_name", "raw_addr", "country",
-        "name", "addr", "tokens_n", "set_n",
-        "norm_tokens_n", "norm_set_n", "core_set_n", "tokens_a", "set_a",
-        "norm_tokens_a", "norm_set_a", "digits_n", "digits_a",
-        "all_digits", "first_num", "len_name", "len_addr",
-        "cnt_name", "cnt_addr", "addr_missing",
+        "entity_id",
+        "raw_name",
+        "raw_addr",
+        "country",
+        "name",
+        "addr",
+        "tokens_n",
+        "set_n",
+        "norm_tokens_n",
+        "norm_set_n",
+        "core_set_n",
+        "char_ngrams_n",
+        "tokens_a",
+        "set_a",
+        "norm_tokens_a",
+        "norm_set_a",
+        "char_ngrams_a",
+        "digits_n",
+        "digits_a",
+        "all_digits",
+        "first_num",
+        "len_name",
+        "len_addr",
+        "cnt_name",
+        "cnt_addr",
+        "addr_missing",
     )
 
     def __init__(self, record: Dict[str, Any]):
@@ -236,11 +306,13 @@ class ParsedRecord:
         self.norm_set_n = set(self.norm_tokens_n)
         legal_words = set(LEGAL_ENTITY_MAP.keys()) | set(LEGAL_ENTITY_MAP.values())
         self.core_set_n = {t for t in self.tokens_n if t not in legal_words}
+        self.char_ngrams_n = get_char_ngrams(self.name, 3)
 
         self.tokens_a = get_tokens(self.addr)
         self.set_a = set(self.tokens_a)
         self.norm_tokens_a = normalize_street_tokens(self.tokens_a)
         self.norm_set_a = set(self.norm_tokens_a)
+        self.char_ngrams_a = get_char_ngrams(self.addr, 3)
 
         self.digits_n = set(get_digits(self.raw_name))
         self.digits_a = set(get_digits(self.raw_addr))
@@ -269,6 +341,7 @@ FEATURE_NAMES: List[str] = [
     "name_norm_token_overlap_min",
     "name_core_token_jaccard",
     "name_core_token_dice",
+    "name_char_3gram_jaccard",
     "name_exact_match",
     "name_prefix_match_4",
     "name_suffix_match_4",
@@ -277,7 +350,6 @@ FEATURE_NAMES: List[str] = [
     "name_token_count_diff",
     "name_token_count_ratio",
     "name_is_single_token",
-
     # Address features
     "address_is_missing_s1",
     "address_is_missing_s2",
@@ -290,15 +362,14 @@ FEATURE_NAMES: List[str] = [
     "address_token_overlap_min",
     "address_norm_token_jaccard",
     "address_norm_token_overlap_min",
+    "address_char_3gram_jaccard",
     "address_exact_match",
     "address_length_diff",
     "address_length_ratio",
-
     # Country features
     "country_exact_match",
     "country_mismatch",
     "country_is_missing",
-
     # Numeric & Token Agreement features
     "num_name_jaccard",
     "num_name_conflict",
@@ -308,7 +379,6 @@ FEATURE_NAMES: List[str] = [
     "num_all_has_common",
     "num_all_conflict",
     "num_primary_match",
-
     # Cross-field Interactions
     "name_and_country_match",
     "name_and_address_jaccard_prod",
@@ -331,6 +401,7 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
     feat_name_norm_overlap = overlap_coefficient(p1.norm_set_n, p2.norm_set_n)
     feat_name_core_jaccard = jaccard_similarity(p1.core_set_n, p2.core_set_n)
     feat_name_core_dice = dice_similarity(p1.core_set_n, p2.core_set_n)
+    feat_name_3gram = jaccard_similarity(p1.char_ngrams_n, p2.char_ngrams_n)
     feat_name_exact = 1.0 if p1.name and p1.name == p2.name else 0.0
 
     # Prefix/suffix match (min 4 chars)
@@ -363,6 +434,7 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         feat_addr_overlap = 0.0
         feat_addr_norm_jaccard = 0.0
         feat_addr_norm_overlap = 0.0
+        feat_addr_3gram = 0.0
         feat_addr_exact = 0.0
         feat_addr_len_diff = float(abs(p1.len_addr - p2.len_addr))
         feat_addr_len_ratio = 0.0
@@ -374,6 +446,7 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         feat_addr_overlap = overlap_coefficient(p1.set_a, p2.set_a)
         feat_addr_norm_jaccard = jaccard_similarity(p1.norm_set_a, p2.norm_set_a)
         feat_addr_norm_overlap = overlap_coefficient(p1.norm_set_a, p2.norm_set_a)
+        feat_addr_3gram = jaccard_similarity(p1.char_ngrams_a, p2.char_ngrams_a)
         feat_addr_exact = 1.0 if p1.addr == p2.addr else 0.0
         feat_addr_len_diff = float(abs(p1.len_addr - p2.len_addr))
         max_a_len = max(p1.len_addr, p2.len_addr)
@@ -400,7 +473,9 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
 
     num_all_jaccard = jaccard_similarity(p1.all_digits, p2.all_digits)
     num_all_has_common = 1.0 if (p1.all_digits & p2.all_digits) else 0.0
-    num_all_conflict = 1.0 if (p1.all_digits and p2.all_digits and not (p1.all_digits & p2.all_digits)) else 0.0
+    num_all_conflict = (
+        1.0 if (p1.all_digits and p2.all_digits and not (p1.all_digits & p2.all_digits)) else 0.0
+    )
 
     if p1.first_num is not None and p2.first_num is not None:
         num_primary_match = 1.0 if p1.first_num == p2.first_num else 0.0
@@ -423,6 +498,7 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         "name_norm_token_overlap_min": feat_name_norm_overlap,
         "name_core_token_jaccard": feat_name_core_jaccard,
         "name_core_token_dice": feat_name_core_dice,
+        "name_char_3gram_jaccard": feat_name_3gram,
         "name_exact_match": feat_name_exact,
         "name_prefix_match_4": feat_name_prefix,
         "name_suffix_match_4": feat_name_suffix,
@@ -431,7 +507,6 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         "name_token_count_diff": feat_name_cnt_diff,
         "name_token_count_ratio": feat_name_cnt_ratio,
         "name_is_single_token": feat_name_single_token,
-
         "address_is_missing_s1": p1.addr_missing,
         "address_is_missing_s2": p2.addr_missing,
         "address_is_missing_either": addr_either_missing,
@@ -443,14 +518,13 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         "address_token_overlap_min": feat_addr_overlap,
         "address_norm_token_jaccard": feat_addr_norm_jaccard,
         "address_norm_token_overlap_min": feat_addr_norm_overlap,
+        "address_char_3gram_jaccard": feat_addr_3gram,
         "address_exact_match": feat_addr_exact,
         "address_length_diff": feat_addr_len_diff,
         "address_length_ratio": feat_addr_len_ratio,
-
         "country_exact_match": feat_country_exact,
         "country_mismatch": feat_country_mismatch,
         "country_is_missing": country_missing,
-
         "num_name_jaccard": num_name_jaccard,
         "num_name_conflict": num_name_conflict,
         "num_address_jaccard": num_addr_jaccard,
@@ -459,7 +533,6 @@ def build_features_from_parsed(p1: ParsedRecord, p2: ParsedRecord) -> Dict[str, 
         "num_all_has_common": num_all_has_common,
         "num_all_conflict": num_all_conflict,
         "num_primary_match": num_primary_match,
-
         "name_and_country_match": name_and_country_match,
         "name_and_address_jaccard_prod": name_and_address_prod,
         "overall_composite_sim": overall_composite,

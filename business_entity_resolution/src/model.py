@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import pickle
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Try LightGBM, with graceful fallback to scikit-learn
 try:
     import lightgbm as lgb
+
     HAS_LIGHTGBM = True
 except ImportError:
     HAS_LIGHTGBM = False
@@ -228,6 +229,7 @@ class EntityMatcher:
 # Shared Upstream Interface Functions
 # ======================================================================
 
+
 def train_model(
     X: Union[np.ndarray, pd.DataFrame],
     y: Union[np.ndarray, pd.Series, Sequence[int]],
@@ -297,11 +299,7 @@ def decide_matches(
         return []
 
     # Filter by threshold
-    passed = [
-        (cid, float(sc))
-        for cid, sc in zip(candidate_ids, scores)
-        if sc >= threshold
-    ]
+    passed = [(cid, float(sc)) for cid, sc in zip(candidate_ids, scores) if sc >= threshold]
 
     if not passed:
         return []
