@@ -58,8 +58,12 @@ class MockComponents:
 
     @staticmethod
     def build_features(source1_record: Dict[str, str], candidate_record: Dict[str, str]) -> Dict[str, float]:
-        name_match = 1.0 if source1_record.get("business_name") == candidate_record.get("business_name") else 0.0
-        country_match = 1.0 if source1_record.get("country") == candidate_record.get("country") else 0.0
+        s1_name = source1_record.get("business_name", "").strip().lower()
+        cand_name = candidate_record.get("business_name", "").strip().lower()
+        s1_country = source1_record.get("country", "").strip().upper()
+        cand_country = candidate_record.get("country", "").strip().upper()
+        name_match = 1.0 if s1_name and s1_name == cand_name else 0.0
+        country_match = 1.0 if s1_country and s1_country == cand_country else 0.0
         return {"name_match": name_match, "country_match": country_match}
 
     @staticmethod
@@ -171,9 +175,15 @@ def run_pipeline(
                 continue
             total_s1 += 1
 
+            # Optional normalization if implemented
+            try:
+                s1_proc = fn_normalize(s1_rec)
+            except NotImplementedError:
+                s1_proc = s1_rec
+
             # Candidate Generation
             try:
-                candidates = fn_blocking(s1_rec, indexes)
+                candidates = fn_blocking(s1_proc, indexes)
             except NotImplementedError:
                 print("ERROR: Shared blocking module is not implemented yet.", file=sys.stderr)
                 print("Hint: Run with --mock to test pipeline scaffolding.", file=sys.stderr)
@@ -191,16 +201,12 @@ def run_pipeline(
                 continue
 
             try:
-                # Build pair features
-                if use_mock:
-                    records_store = indexes.get("records", {})
-                    X_pairs = [
-                        fn_features(s1_rec, records_store.get(cid, {"entity_id": cid}))
-                        for cid in cand_list
-                    ]
-                else:
-                    # In production, teammate modules handle candidate retrieval / scoring
-                    X_pairs = [fn_features(s1_rec, {"entity_id": cid}) for cid in cand_list]
+                # Build pair features using record store if available
+                records_store = indexes.get("records", {})
+                X_pairs = [
+                    fn_features(s1_proc, records_store.get(cid, {"entity_id": cid}))
+                    for cid in cand_list
+                ]
 
                 scores = fn_predict(model, X_pairs)
                 matched_ids = fn_decide(cand_list, scores, threshold)
