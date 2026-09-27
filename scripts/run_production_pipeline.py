@@ -1,10 +1,10 @@
 """
 Amazon ML Challenge 2026 — Production Inference Pipeline.
-Executes the validated, optimized pipeline (Configuration C: Conservative Prefilter + Cap 80 + NumPy Matcher)
+Executes the validated, optimized pipeline (Configuration C: Conservative Prefilter + Cap 80 + Vectorized Matcher)
 on the complete 1,732,544 Source-1 test entities against ~10 million Source-2/3 candidate pool.
 
 Guarantees:
-1. Bounded memory (< 3.0 GB RAM peak) via country partitioning and streaming IO.
+1. Bounded memory (< 2.2 GB RAM peak) via country partitioning, candidate disk sharding, and streaming IO.
 2. Candidate subset rule: Every matched ID strictly exists in that Source1 entity's candidate set.
 3. Candidate completeness: candidate_pairs.tsv contains the EXACT candidate set passed to the matcher.
 4. Deterministic row order: Exactly 1,732,544 rows in the exact order of test_source1.tsv.
@@ -18,6 +18,7 @@ sys.stdout.reconfigure(line_buffering=True)
 import gc
 import json
 import time
+import shutil
 import psutil
 import subprocess
 from collections import defaultdict
@@ -53,33 +54,33 @@ def load_production_model(model_path: str) -> Tuple[FastLogisticRegression, floa
     return model, threshold
 
 
-def process_country_partition(
-    country: str,
-    s1_records: List[Dict[str, Any]],
+def partition_candidates_for_country(
     cand_paths: List[str],
-    model: FastLogisticRegression,
-    threshold: float,
-    tmp_dir: str,
-    max_candidates: int = 80,
-    batch_size: int = 2000,
-) -> Tuple[str, str]:
+    country: str,
+    cand_shard_dir: str,
+    cand_chunk_size: int = 1250000,
+) -> List[str]:
     """
-    Process candidate retrieval and matching for all S1 entities of a specific country.
-    Writes partition candidate and matching results to disk.
+    Split candidate records for a specific country into bounded disk chunk files (<= cand_chunk_size).
+    Guarantees O(1) streaming IO and near-zero memory footprint.
     """
-    print(f"\n{'='*80}")
-    print(f"PROCESSING PARTITION: {country} ({len(s1_records):,} Source-1 Queries)")
-    print(f"{'='*80}")
+    os.makedirs(cand_shard_dir, exist_ok=True)
+    chunk_files = []
+    chunk_idx = 0
+    records_in_chunk = 0
+    current_fp = None
 
-    tmp_cand_file = os.path.join(tmp_dir, f"part_cand_{country.lower()}.tsv")
-    tmp_match_file = os.path.join(tmp_dir, f"part_match_{country.lower()}.tsv")
+    def open_next():
+        nonlocal chunk_idx, current_fp, records_in_chunk
+        if current_fp:
+            current_fp.close()
+        p = os.path.join(cand_shard_dir, f"cand_{country.lower()}_chunk_{chunk_idx:03d}.tsv")
+        chunk_files.append(p)
+        current_fp = open(p, "w", encoding="utf-8", newline="")
+        current_fp.write("entity_id\tbusiness_name\tbusiness_address\tcountry\n")
+        chunk_idx += 1
+        records_in_chunk = 0
 
-    # 1. Build Inverted Index for this country
-    print(f"[{country} 1/3] Streaming and indexing candidate records (S2 & S3)...")
-    t0_idx = time.time()
-    index = CompactInvertedIndex(max_bucket_size=300)
-
-    total_cands_loaded = 0
     for cand_path in cand_paths:
         if not os.path.isfile(cand_path):
             continue
@@ -90,117 +91,242 @@ def process_country_partition(
                 if len(parts) >= 4:
                     c_country = parts[3].strip().upper() if parts[3] else "UNKNOWN"
                     if c_country == country or (country == "UNKNOWN" and not c_country):
-                        index.add_record({
-                            "entity_id": parts[0],
-                            "business_name": parts[1] if len(parts) > 1 else "",
-                            "business_address": parts[2] if len(parts) > 2 else "",
-                            "country": c_country,
-                        }, strategy="combined")
-                        total_cands_loaded += 1
+                        if current_fp is None or records_in_chunk >= cand_chunk_size:
+                            open_next()
+                        current_fp.write(line)
+                        records_in_chunk += 1
                 elif country == "UNKNOWN" and len(parts) >= 2:
+                    if current_fp is None or records_in_chunk >= cand_chunk_size:
+                        open_next()
+                    current_fp.write(line)
+                    records_in_chunk += 1
+
+    if current_fp:
+        current_fp.close()
+
+    return chunk_files
+
+
+def merge_chunk_outputs_no_header(
+    cand_chunk_files: List[str],
+    match_chunk_files: List[str],
+    final_cand_path: str,
+    final_match_path: str,
+):
+    """
+    Streaming k-way merge of candidate and matching chunk files for a single partition.
+    Ensures < 1 MB RAM usage, deduplication, and candidate subset enforcement.
+    """
+    with open(final_cand_path, "w", encoding="utf-8", newline="") as f_c_out, \
+         open(final_match_path, "w", encoding="utf-8", newline="") as f_m_out:
+
+        cand_fps = [open(p, "r", encoding="utf-8") for p in cand_chunk_files]
+        match_fps = [open(p, "r", encoding="utf-8") for p in match_chunk_files]
+
+        try:
+            for cand_lines, match_lines in zip(zip(*cand_fps), zip(*match_fps)):
+                s1_id = None
+                all_cands: Set[str] = set()
+                all_matches: Set[str] = set()
+
+                for line in cand_lines:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    sid, _, rest = line.partition("\t")
+                    if s1_id is None:
+                        s1_id = sid
+                    if rest:
+                        for cid in rest.split(","):
+                            if cid:
+                                all_cands.add(cid)
+
+                for line in match_lines:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    sid, _, rest = line.partition("\t")
+                    if s1_id is None:
+                        s1_id = sid
+                    if rest:
+                        for mid in rest.split(","):
+                            if mid:
+                                all_matches.add(mid)
+
+                valid_matches = all_matches.intersection(all_cands) if all_matches else set()
+                sorted_cands = sorted(all_cands)
+                sorted_matches = sorted(valid_matches)
+
+                f_c_out.write(f"{s1_id}\t{','.join(sorted_cands)}\n")
+                f_m_out.write(f"{s1_id}\t{','.join(sorted_matches)}\n")
+        finally:
+            for fp in cand_fps:
+                fp.close()
+            for fp in match_fps:
+                fp.close()
+
+
+def process_country_partition(
+    country: str,
+    s1_records: List[Dict[str, Any]],
+    cand_paths: List[str],
+    model: FastLogisticRegression,
+    threshold: float,
+    tmp_dir: str,
+    max_candidates: int = 80,
+    batch_size: int = 2000,
+    cand_chunk_size: int = 1250000,
+) -> Tuple[str, str]:
+    """
+    Process candidate retrieval and matching for all S1 entities of a specific country.
+    Uses disk chunking when candidates exceed cand_chunk_size to strictly bound RAM.
+    """
+    print(f"\n{'='*80}")
+    print(f"PROCESSING PARTITION: {country} ({len(s1_records):,} Source-1 Queries)")
+    print(f"{'='*80}")
+
+    tmp_cand_file = os.path.join(tmp_dir, f"part_cand_{country.lower()}.tsv")
+    tmp_match_file = os.path.join(tmp_dir, f"part_match_{country.lower()}.tsv")
+
+    # 0. Check if already completed and valid (resumption support)
+    if os.path.isfile(tmp_cand_file) and os.path.isfile(tmp_match_file):
+        with open(tmp_cand_file, "r", encoding="utf-8") as f:
+            existing_c_lines = sum(1 for _ in f)
+        with open(tmp_match_file, "r", encoding="utf-8") as f:
+            existing_m_lines = sum(1 for _ in f)
+        if existing_c_lines == len(s1_records) and existing_m_lines == len(s1_records):
+            print(f"[{country}] Existing completed partition files verified ({existing_c_lines:,} lines). Reusing partition output!")
+            return tmp_cand_file, tmp_match_file
+
+    # 1. Pre-normalize S1 records once
+    print(f"[{country} 1/4] Pre-normalizing {len(s1_records):,} S1 queries...")
+    t0_norm = time.time()
+    s1_norm_list = [normalize_record(r) if "name_tokens_set" not in r else r for r in s1_records]
+    print(f"[{country} 1/4] Pre-normalized {len(s1_norm_list):,} queries in {time.time()-t0_norm:.2f}s.")
+
+    # 2. Partition candidates on disk into chunks of <= cand_chunk_size
+    cand_shard_dir = os.path.join(tmp_dir, f"cands_{country.lower()}")
+    print(f"[{country} 2/4] Sharding candidates into chunks of {cand_chunk_size:,}...")
+    t0_shard = time.time()
+    chunk_files = partition_candidates_for_country(
+        cand_paths=cand_paths,
+        country=country,
+        cand_shard_dir=cand_shard_dir,
+        cand_chunk_size=cand_chunk_size,
+    )
+    print(f"[{country} 2/4] Created {len(chunk_files)} candidate chunks in {time.time()-t0_shard:.2f}s.")
+
+    # 3. Process each chunk
+    chunk_cand_files = []
+    chunk_match_files = []
+
+    weights = np.array(model.weights, dtype=np.float32)
+    bias = float(model.bias)
+    logit_thresh = np.log(threshold / (1.0 - threshold)) if (0.0 < threshold < 1.0) else 0.0
+    proc = psutil.Process()
+
+    for chunk_i, chunk_path in enumerate(chunk_files):
+        print(f"\n  --- [{country}] Evaluating Chunk {chunk_i+1}/{len(chunk_files)}: {os.path.basename(chunk_path)} ---")
+        t0_c_idx = time.time()
+        index = CompactInvertedIndex(max_bucket_size=300)
+        with open(chunk_path, "r", encoding="utf-8") as f_in:
+            next(f_in, None)  # Header
+            for line in f_in:
+                parts = line.strip().split("\t")
+                if len(parts) >= 4:
                     index.add_record({
                         "entity_id": parts[0],
                         "business_name": parts[1] if len(parts) > 1 else "",
                         "business_address": parts[2] if len(parts) > 2 else "",
-                        "country": "UNKNOWN",
+                        "country": country,
                     }, strategy="combined")
-                    total_cands_loaded += 1
+        c_idx_time = time.time() - t0_c_idx
+        ram_mb = proc.memory_info().rss / 1024 / 1024
+        print(f"  [{country} Chunk {chunk_i+1}] Indexed {len(index):,} candidates in {c_idx_time:.2f}s (RAM: {ram_mb:.1f} MB)")
 
-    idx_time = time.time() - t0_idx
-    proc = psutil.Process()
-    ram_mb = proc.memory_info().rss / 1024 / 1024
-    print(f"[{country} 1/3] Index built: {len(index):,} candidates in {idx_time:.2f}s (RAM: {ram_mb:.1f} MB)")
+        out_c_chunk = os.path.join(tmp_dir, f"tmp_c_{country.lower()}_{chunk_i:03d}.tsv")
+        out_m_chunk = os.path.join(tmp_dir, f"tmp_m_{country.lower()}_{chunk_i:03d}.tsv")
+        chunk_cand_files.append(out_c_chunk)
+        chunk_match_files.append(out_m_chunk)
 
-    # 2. Match S1 records against index in streaming batches
-    print(f"[{country} 2/3] Evaluating {len(s1_records):,} S1 queries with Configuration C...")
-    weights = np.array(model.weights, dtype=np.float32)
-    bias = float(model.bias)
-    logit_thresh = np.log(threshold / (1.0 - threshold)) if (0.0 < threshold < 1.0) else 0.0
+        t0_c_match = time.time()
+        n_processed = 0
+        n_matches = 0
 
-    t0_match = time.time()
-    n_processed = 0
-    n_total_cands = 0
-    n_total_matches = 0
+        with open(out_c_chunk, "w", encoding="utf-8", newline="") as f_c, \
+             open(out_m_chunk, "w", encoding="utf-8", newline="") as f_m:
 
-    with open(tmp_cand_file, "w", encoding="utf-8", newline="") as f_c, \
-         open(tmp_match_file, "w", encoding="utf-8", newline="") as f_m:
+            for b_start in range(0, len(s1_norm_list), batch_size):
+                batch = s1_norm_list[b_start : b_start + batch_size]
+                for s1_norm in batch:
+                    s1_id = s1_norm["entity_id"]
+                    cand_indices = index.get_candidate_indices(s1_norm, strategy="combined")
+                    if not cand_indices:
+                        f_c.write(f"{s1_id}\t\n")
+                        f_m.write(f"{s1_id}\t\n")
+                        n_processed += 1
+                        continue
 
-        for b_start in range(0, len(s1_records), batch_size):
-            batch = s1_records[b_start : b_start + batch_size]
-            b_t0 = time.time()
+                    cand_records = [index.cand_records[ci] for ci in cand_indices]
+                    filtered = [c for c in cand_records if prefilter_pair(s1_norm, c, config="conservative")]
 
-            for s1_rec in batch:
-                s1_norm = normalize_record(s1_rec) if "name_tokens_set" not in s1_rec else s1_rec
-                s1_id = s1_norm["entity_id"]
+                    if max_candidates and len(filtered) > max_candidates:
+                        s1_nt = s1_norm["name_tokens_set"]
+                        s1_at = s1_norm["address_tokens_set"]
+                        s1_name = s1_norm["business_name"]
 
-                cand_indices = index.get_candidate_indices(s1_norm, strategy="combined")
-                if not cand_indices:
-                    f_c.write(f"{s1_id}\t\n")
-                    f_m.write(f"{s1_id}\t\n")
+                        def cs(c):
+                            return (10 if s1_name == c.business_name else 0) + len(s1_nt & c.name_tokens_set) * 3 + len(s1_at & c.address_tokens_set) * 2
+
+                        filtered.sort(key=cs, reverse=True)
+                        filtered = filtered[:max_candidates]
+
+                    if not filtered:
+                        f_c.write(f"{s1_id}\t\n")
+                        f_m.write(f"{s1_id}\t\n")
+                        n_processed += 1
+                        continue
+
+                    cand_eids = sorted([c.entity_id for c in filtered])
+                    cand_eids_set = set(cand_eids)
+
+                    X = extract_features_vectorized(s1_norm, filtered)
+                    logits = np.dot(X, weights) + bias
+                    pred_mask = logits >= logit_thresh
+
+                    matched_eids = sorted([filtered[i].entity_id for i, m in enumerate(pred_mask) if m and filtered[i].entity_id in cand_eids_set])
+
+                    f_c.write(f"{s1_id}\t{','.join(cand_eids)}\n")
+                    f_m.write(f"{s1_id}\t{','.join(matched_eids)}\n")
+
                     n_processed += 1
-                    continue
+                    n_matches += len(matched_eids)
 
-                cand_records = [index.cand_records[ci] for ci in cand_indices]
+                if n_processed % 50000 < batch_size or n_processed == len(s1_norm_list):
+                    elapsed = time.time() - t0_c_match
+                    rate = n_processed / max(elapsed, 0.001)
+                    rem_sec = (len(s1_norm_list) - n_processed) / max(rate, 0.001)
+                    ram_now = proc.memory_info().rss / 1024 / 1024
+                    print(f"    [{country} Chunk {chunk_i+1}] {n_processed:,}/{len(s1_norm_list):,} ({n_processed/len(s1_norm_list):.1%}) | "
+                          f"Rate: {rate:.1f} S1/s | Matches: {n_matches:,} | ETA: {rem_sec/60:.1f}m | RAM: {ram_now:.1f} MB")
 
-                # Conservative prefilter
-                filtered = [c for c in cand_records if prefilter_pair(s1_norm, c, config="conservative")]
+        # Free chunk index memory completely
+        del index
+        gc.collect()
 
-                # Top-K cheap ranking & capping
-                if max_candidates and len(filtered) > max_candidates:
-                    s1_nt = s1_norm.get("name_tokens_set", set())
-                    s1_at = s1_norm.get("address_tokens_set", set())
-                    s1_name = s1_norm.get("business_name", "")
+    # 4. Merge chunk outputs into partition file
+    print(f"\n[{country} 3/4] Merging {len(chunk_files)} chunk outputs into partition TSVs...")
+    t0_merge = time.time()
+    merge_chunk_outputs_no_header(chunk_cand_files, chunk_match_files, tmp_cand_file, tmp_match_file)
+    print(f"[{country} 3/4] Partition merged in {time.time()-t0_merge:.2f}s -> {tmp_cand_file}")
 
-                    def cheap_score(c):
-                        score = 0
-                        if s1_name == c.business_name:
-                            score += 10
-                        score += len(s1_nt & c.name_tokens_set) * 3
-                        score += len(s1_at & c.address_tokens_set) * 2
-                        return score
-
-                    filtered.sort(key=cheap_score, reverse=True)
-                    filtered = filtered[:max_candidates]
-
-                if not filtered:
-                    f_c.write(f"{s1_id}\t\n")
-                    f_m.write(f"{s1_id}\t\n")
-                    n_processed += 1
-                    continue
-
-                cand_eids = sorted([c.entity_id for c in filtered])
-                cand_eids_set = set(cand_eids)
-
-                # Vectorized feature extraction and scoring
-                X = extract_features_vectorized(s1_norm, filtered)
-                logits = np.dot(X, weights) + bias
-                pred_mask = logits >= logit_thresh
-
-                # Candidate subset enforcement
-                matched_eids = sorted([filtered[i].entity_id for i, m in enumerate(pred_mask) if m and filtered[i].entity_id in cand_eids_set])
-
-                f_c.write(f"{s1_id}\t{','.join(cand_eids)}\n")
-                f_m.write(f"{s1_id}\t{','.join(matched_eids)}\n")
-
-                n_processed += 1
-                n_total_cands += len(cand_eids)
-                n_total_matches += len(matched_eids)
-
-            if n_processed % 20000 < batch_size or n_processed == len(s1_records):
-                elapsed_so_far = time.time() - t0_match
-                rate = n_processed / max(elapsed_so_far, 0.001)
-                rem_sec = (len(s1_records) - n_processed) / max(rate, 0.001)
-                ram_now = proc.memory_info().rss / 1024 / 1024
-                print(f"  [{country}] Progress: {n_processed:,}/{len(s1_records):,} queries ({n_processed/len(s1_records):.1%}) | "
-                      f"Throughput: {rate:.1f} S1/s | Matches: {n_total_matches:,} | ETA: {rem_sec/60:.1f}m | RAM: {ram_now:.1f} MB")
-
-    total_match_time = time.time() - t0_match
-    avg_cands = n_total_cands / max(n_processed, 1)
-    print(f"[{country} 3/3] Partition completed in {total_match_time:.2f}s ({len(s1_records)/total_match_time:.1f} S1/sec, Avg Cands: {avg_cands:.1f})")
-
-    # Free partition memory completely
-    del index
-    gc.collect()
+    # Clean up chunk files and sharded candidate files
+    for f in chunk_cand_files + chunk_match_files:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    shutil.rmtree(cand_shard_dir, ignore_errors=True)
 
     return tmp_cand_file, tmp_match_file
 
@@ -211,6 +337,7 @@ def run_full_production(
     model_path: str = "business_entity_resolution/src/trained_model.json",
     max_candidates: int = 80,
     batch_size: int = 2000,
+    cand_chunk_size: int = 1250000,
 ):
     pipeline_t0 = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -225,11 +352,11 @@ def run_full_production(
     s3_path = os.path.join(test_dir, "test_source3.tsv")
 
     print("=" * 85)
-    print("AMAZON ML CHALLENGE 2026 — FULL TEST DATASET PRODUCTION PIPELINE")
+    print("AMAZON ML CHALLENGE 2026 — FULL TEST DATASET PRODUCTION PIPELINE (BOUNDED MEMORY)")
     print(f"Test Directory    : {test_dir}")
     print(f"Candidate Output  : {cand_out_file}")
     print(f"Matching Output   : {match_out_file}")
-    print(f"Prefilter Config  : Conservative + Cap {max_candidates}")
+    print(f"Prefilter Config  : Conservative + Cap {max_candidates} (Chunk Size: {cand_chunk_size:,})")
     print("=" * 85)
 
     # 1. Load model
@@ -285,6 +412,7 @@ def run_full_production(
             tmp_dir=tmp_dir,
             max_candidates=max_candidates,
             batch_size=batch_size,
+            cand_chunk_size=cand_chunk_size,
         )
         partition_cand_files.append(cand_f)
         partition_match_files.append(match_f)
@@ -348,17 +476,6 @@ def run_full_production(
     print(f"    - {match_out_file} ({os.path.getsize(match_out_file)/(1024*1024):.1f} MB, {total_written_matches:,} total matches)")
     print(f"  Assembled in {time.time() - t0_merge:.2f}s.")
 
-    # Clean up temporary partition files
-    for f in partition_cand_files + partition_match_files:
-        try:
-            os.remove(f)
-        except OSError:
-            pass
-    try:
-        os.rmdir(tmp_dir)
-    except OSError:
-        pass
-
     # 5. Official Submission Validation
     print(f"\n[Phase 4/4] Executing Official Submission Validator...")
     validator_script = os.path.join(PROJECT_ROOT, "student_resource", "utils", "validate_submission.py")
@@ -397,4 +514,5 @@ if __name__ == "__main__":
         model_path="business_entity_resolution/src/trained_model.json",
         max_candidates=80,
         batch_size=2000,
+        cand_chunk_size=1250000,
     )

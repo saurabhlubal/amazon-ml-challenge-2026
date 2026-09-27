@@ -35,3 +35,7 @@ experiments/results/
 # Temporary files
 tmp/
 temp/
+
+# Submissions and archives
+submission/
+*.zip

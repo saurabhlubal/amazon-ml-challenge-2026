@@ -174,16 +174,26 @@ def extract_features_vectorized(
     s1_shingles: Set[str] = set(s1_norm.get("char_shingles", []))
 
     for i, c in enumerate(cand_norms):
-        c_raw_name = c.get("raw_business_name", "")
-        c_name = c.get("business_name", "")
-        c_sig = c.get("name_signature", "")
-        c_addr = c.get("business_address", "")
-        c_country = c.get("country", "")
-
-        c_name_toks: Set[str] = c.get("name_tokens_set", set())
-        c_addr_toks: Set[str] = c.get("address_tokens_set", set())
-        c_nums: Set[str] = c.get("address_numbers", set())
-        c_shingles: Set[str] = set(c.get("char_shingles", []))
+        if hasattr(c, "raw_business_name"):
+            c_raw_name = c.raw_business_name
+            c_name = c.business_name
+            c_sig = c.name_signature
+            c_addr = c.business_address
+            c_country = c.country
+            c_name_toks = c.name_tokens_set
+            c_addr_toks = c.address_tokens_set
+            c_nums = c.address_numbers
+            c_shingles = set(c.char_shingles)
+        else:
+            c_raw_name = c.get("raw_business_name", "")
+            c_name = c.get("business_name", "")
+            c_sig = c.get("name_signature", "")
+            c_addr = c.get("business_address", "")
+            c_country = c.get("country", "")
+            c_name_toks = c.get("name_tokens_set", set())
+            c_addr_toks = c.get("address_tokens_set", set())
+            c_nums = c.get("address_numbers", set())
+            c_shingles = set(c.get("char_shingles", []))
 
         # 0. name_exact_raw
         if s1_raw_name and s1_raw_name == c_raw_name:
